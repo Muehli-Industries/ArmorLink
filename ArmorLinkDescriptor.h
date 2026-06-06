@@ -11,17 +11,14 @@ public:
   static String build(const ArmorLinkModule& module) {
     StaticJsonDocument<4096> doc;
 
-    // Backward-compatible module identity fields.
-    // Older payloads only exposed "module" as a string, while the app-side model
-    // expects/benefits from an explicit "name" field. Without this, consumers may
-    // fall back to moduleType, e.g. "Chest".
+
     doc["module"] = module.name();
     doc["name"] = module.name();
-    doc["configVersion"] = 1;
+    doc["moduleVersion"] = module.version();
+    doc["armorLinkVersion"] = ARMORLINK_VERSION;
     doc["supportsPartialConfigGet"] = false;
     doc["supportsConfigSet"] = true;
     doc["moduleType"] = moduleTypeToString(module.type());
-
     JsonArray sections = doc.createNestedArray("sections");
     appendSections(module, sections);
 

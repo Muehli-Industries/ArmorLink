@@ -4,6 +4,10 @@
 
 #include <Arduino.h>
 
+#ifndef ARMORLINK_VERSION
+#define ARMORLINK_VERSION "0.2.0"
+#endif
+
 static constexpr uint8_t  ARMORLINK_PROTOCOL_VERSION = 2;
 static constexpr uint16_t ARMORLINK_CHUNK_DATA_SIZE  = 140;
 static constexpr uint16_t ARMORLINK_MAX_CHUNKS       = 64;

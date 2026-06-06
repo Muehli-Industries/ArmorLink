@@ -15,6 +15,8 @@ struct ArmorLinkStoredPairedModule {
   char name[16] = { 0 };
   char type[16] = { 0 };
   char mac[18] = { 0 };
+  char moduleVersion[16] = "1.0";
+  char armorLinkVersion[16] = { 0 };
 };
 
 class ArmorLinkStorage {
@@ -244,10 +246,14 @@ static String sanitizeKey(const String& input) {
       String keyName = String("pm_name_") + i;
       String keyType = String("pm_type_") + i;
       String keyMac  = String("pm_mac_") + i;
+      String keyModuleVersion = String("pm_modver_") + i;
+      String keyArmorLinkVersion = String("pm_alver_") + i;
 
       getStringIntoBuffer(prefs, keyName.c_str(), outModules[i].name, sizeof(outModules[i].name));
       getStringIntoBuffer(prefs, keyType.c_str(), outModules[i].type, sizeof(outModules[i].type));
       getStringIntoBuffer(prefs, keyMac.c_str(), outModules[i].mac, sizeof(outModules[i].mac));
+      getStringIntoBuffer(prefs, keyModuleVersion.c_str(), outModules[i].moduleVersion, sizeof(outModules[i].moduleVersion), "1.0");
+      getStringIntoBuffer(prefs, keyArmorLinkVersion.c_str(), outModules[i].armorLinkVersion, sizeof(outModules[i].armorLinkVersion));
     }
 
     prefs.end();
@@ -271,15 +277,21 @@ static String sanitizeKey(const String& input) {
       String keyName = String("pm_name_") + i;
       String keyType = String("pm_type_") + i;
       String keyMac  = String("pm_mac_") + i;
+      String keyModuleVersion = String("pm_modver_") + i;
+      String keyArmorLinkVersion = String("pm_alver_") + i;
 
       if (i < clampedCount) {
         prefs.putString(keyName.c_str(), modules[i].name);
         prefs.putString(keyType.c_str(), modules[i].type);
         prefs.putString(keyMac.c_str(), modules[i].mac);
+        prefs.putString(keyModuleVersion.c_str(), strlen(modules[i].moduleVersion) > 0 ? modules[i].moduleVersion : "1.0");
+        prefs.putString(keyArmorLinkVersion.c_str(), modules[i].armorLinkVersion);
       } else {
         prefs.remove(keyName.c_str());
         prefs.remove(keyType.c_str());
         prefs.remove(keyMac.c_str());
+        prefs.remove(keyModuleVersion.c_str());
+        prefs.remove(keyArmorLinkVersion.c_str());
       }
     }
 
@@ -324,13 +336,17 @@ private:
     return value;
   }
 
-  static void getStringIntoBuffer(Preferences& prefs, const char* key, char* buffer, size_t bufferSize) {
+  static void getStringIntoBuffer(Preferences& prefs,
+                                  const char* key,
+                                  char* buffer,
+                                  size_t bufferSize,
+                                  const char* fallback = "") {
     if (!buffer || bufferSize == 0) {
       return;
     }
 
     memset(buffer, 0, bufferSize);
-    String value = prefs.getString(key, "");
+    String value = prefs.getString(key, fallback);
     strncpy(buffer, value.c_str(), bufferSize - 1);
   }
 };

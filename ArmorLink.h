@@ -48,6 +48,8 @@ struct ArmorLinkPairingCandidate {
   char name[16] = { 0 };
   char type[16] = { 0 };
   char mac[18] = { 0 };
+  char moduleVersion[16] = "1.0";
+  char armorLinkVersion[16] = { 0 };
 };
 
 struct ArmorLinkModulePresenceState {
@@ -314,9 +316,12 @@ void onBleConnected() {
     module["name"] = _module->name();
     module["type"] = moduleTypeToString(_module->type());
     module["mac"] = localMacString();
+    module["moduleVersion"] = _module->version();
+    module["armorLinkVersion"] = ARMORLINK_VERSION;
     module["isGateway"] = true;
 
     doc["bleName"] = _options.bleName;
+    doc["armorLinkVersion"] = ARMORLINK_VERSION;
 
     String out;
     serializeJson(doc, out);
@@ -465,10 +470,13 @@ void onBleDisconnected() {
 
     String payload;
     {
-      StaticJsonDocument<192> doc;
+      StaticJsonDocument<256> doc;
       doc["sessionId"] = _pendingCandidates[index].sessionId;
       doc["gatewayName"] = (_module != nullptr) ? _module->name() : "Gateway";
+      doc["gatewayType"] = (_module != nullptr) ? moduleTypeToString(_module->type()) : "Generic";
       doc["gatewayMac"] = localMacString();
+      doc["gatewayModuleVersion"] = (_module != nullptr) ? _module->version() : "1.0";
+      doc["gatewayArmorLinkVersion"] = ARMORLINK_VERSION;
       doc["recoveryPin"] = _pairingInfo.recoveryPin;
       serializeJson(doc, payload);
     }
@@ -1619,6 +1627,8 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
   module["name"] = _module->name();
   module["type"] = moduleTypeToString(_module->type());
   module["mac"] = localMacString();
+  module["moduleVersion"] = _module->version();
+  module["armorLinkVersion"] = ARMORLINK_VERSION;
 
   String eventJson;
   serializeJson(eventDoc, eventJson);
@@ -1930,10 +1940,12 @@ bool sendStateSyncRequest() {
   }
   String payload;
   {
-    StaticJsonDocument<256> doc;
+    StaticJsonDocument<320> doc;
     doc["moduleName"] = _module->name();
     doc["moduleType"] = moduleTypeToString(_module->type());
     doc["moduleMac"] = localMacString();
+    doc["moduleVersion"] = _module->version();
+    doc["armorLinkVersion"] = ARMORLINK_VERSION;
     doc["wantLogs"] = true;
     doc["wantTelemetry"] = true;
     serializeJson(doc, payload);
@@ -1994,10 +2006,12 @@ bool sendHeartbeat() {
   }
   String payload;
   {
-    StaticJsonDocument<224> doc;
+    StaticJsonDocument<288> doc;
     doc["moduleName"] = _module->name();
     doc["moduleType"] = moduleTypeToString(_module->type());
     doc["moduleMac"] = localMacString();
+    doc["moduleVersion"] = _module->version();
+    doc["armorLinkVersion"] = ARMORLINK_VERSION;
     doc["uptimeMs"] = millis();
     serializeJson(doc, payload);
   }
@@ -2168,10 +2182,12 @@ bool sendStartupHello() {
 
   String payload;
   {
-    StaticJsonDocument<224> doc;
+    StaticJsonDocument<288> doc;
     doc["moduleName"] = _module->name();
     doc["moduleType"] = moduleTypeToString(_module->type());
     doc["moduleMac"] = localMacString();
+    doc["moduleVersion"] = _module->version();
+    doc["armorLinkVersion"] = ARMORLINK_VERSION;
     serializeJson(doc, payload);
   }
 
@@ -2273,6 +2289,8 @@ void emitModulePresenceSnapshot() {
     mod["name"] = module.name;
     mod["type"] = module.type;
     mod["mac"] = module.mac;
+    mod["moduleVersion"] = strlen(module.moduleVersion) > 0 ? module.moduleVersion : "1.0";
+    mod["armorLinkVersion"] = module.armorLinkVersion;
 
     String out;
     serializeJson(doc, out);
@@ -2423,11 +2441,13 @@ static void handleBleConnectedStatic() {
 
     String payload;
     {
-      StaticJsonDocument<224> doc;
+      StaticJsonDocument<288> doc;
       doc["sessionId"] = _pairingSessionId;
       doc["gatewayName"] = _module->name();
       doc["gatewayType"] = moduleTypeToString(_module->type());
       doc["gatewayMac"] = localMacString();
+      doc["gatewayModuleVersion"] = _module->version();
+      doc["gatewayArmorLinkVersion"] = ARMORLINK_VERSION;
       doc["recoveryPin"] = _pairingInfo.recoveryPin;
       serializeJson(doc, payload);
     }
@@ -2486,12 +2506,14 @@ static void handleBleConnectedStatic() {
 
     String payload;
     {
-      StaticJsonDocument<256> reply;
+      StaticJsonDocument<320> reply;
       reply["sessionId"] = sessionId;
       reply["gatewayMac"] = gatewayMac;
       reply["moduleName"] = _module->name();
       reply["moduleType"] = moduleTypeToString(_module->type());
       reply["moduleMac"] = localMacString();
+      reply["moduleVersion"] = _module->version();
+      reply["armorLinkVersion"] = ARMORLINK_VERSION;
       serializeJson(reply, payload);
     }
 
@@ -2555,7 +2577,7 @@ static void handleBleConnectedStatic() {
       return;
     }
 
-    StaticJsonDocument<224> doc;
+    StaticJsonDocument<320> doc;
     if (deserializeJson(doc, armorLinkPacketPayloadToString(msg)) != DeserializationError::Ok) {
       Serial.println("[PAIR][GW] JSON parse failed");
       return;
@@ -2592,6 +2614,8 @@ static void handleBleConnectedStatic() {
     const String moduleName = String((const char*)(doc["moduleName"] | ""));
     const String moduleType = String((const char*)(doc["moduleType"] | ""));
     const String moduleMac  = String((const char*)(doc["moduleMac"] | ""));
+    const String moduleVersion = String((const char*)(doc["moduleVersion"] | "1.0"));
+    const String armorLinkVersion = String((const char*)(doc["armorLinkVersion"] | ""));
 
     Serial.printf("[PAIR][GW] moduleName=%s moduleType=%s moduleMac=%s\n",
                   moduleName.c_str(),
@@ -2616,6 +2640,8 @@ static void handleBleConnectedStatic() {
     armorlinkCopyString(_pendingCandidates[index].name, sizeof(_pendingCandidates[index].name), moduleName);
     armorlinkCopyString(_pendingCandidates[index].type, sizeof(_pendingCandidates[index].type), moduleType);
     armorlinkCopyString(_pendingCandidates[index].mac, sizeof(_pendingCandidates[index].mac), moduleMac);
+    armorlinkCopyString(_pendingCandidates[index].moduleVersion, sizeof(_pendingCandidates[index].moduleVersion), moduleVersion);
+    armorlinkCopyString(_pendingCandidates[index].armorLinkVersion, sizeof(_pendingCandidates[index].armorLinkVersion), armorLinkVersion);
 
     rebuildPendingCandidateCount();
     Serial.println("[PAIR][GW] Emitting pairing_candidate BLE event");

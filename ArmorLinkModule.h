@@ -405,11 +405,21 @@ private:
 
 class ArmorLinkModule {
 public:
-  ArmorLinkModule(const String& name, ArmorLinkModuleType type = ArmorLinkModuleType::Generic)
-      : _name(name), _type(type) {}
+  ArmorLinkModule(const String& name,
+                  ArmorLinkModuleType type = ArmorLinkModuleType::Generic,
+                  const String& version = "1.0")
+      : _name(name),
+        _type(type),
+        _version(version.isEmpty() ? "1.0" : version) {}
 
   const String& name() const { return _name; }
   ArmorLinkModuleType type() const { return _type; }
+  const String& version() const { return _version; }
+
+  ArmorLinkModule& version(const String& value) {
+    _version = value.isEmpty() ? "1.0" : value;
+    return *this;
+  }
 
   ArmorLinkConfigRegistry& config() { return _config; }
   const ArmorLinkConfigRegistry& config() const { return _config; }
@@ -420,6 +430,7 @@ public:
 private:
   String _name;
   ArmorLinkModuleType _type;
+  String _version = "1.0";
   ArmorLinkConfigRegistry _config;
   ArmorLinkActionRegistry _actions;
 };
