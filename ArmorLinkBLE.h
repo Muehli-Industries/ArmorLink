@@ -19,7 +19,7 @@
 #define ARMORLINK_COMMAND_RX_UUID  "b6f8d8f2-4f3d-4d2c-98d3-9c91a2d0e101"
 #define ARMORLINK_EVENT_TX_UUID    "b6f8d8f2-4f3d-4d2c-98d3-9c91a2d0e102"
 #define ARMORLINK_LOG_TX_UUID      "b6f8d8f2-4f3d-4d2c-98d3-9c91a2d0e103"
-#define ARMORLINK_PASSKEY          130188
+
 using ArmorLinkBleConnectHook = void (*)();
 using ArmorLinkBleDisconnectHook = void (*)();
 
@@ -53,15 +53,20 @@ public:
       Serial.println("?? Starte BLE im SECURE MODE");
 
       BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
-      BLEDevice::setSecurityCallbacks(new SecurityCallbackBridge());
 
-      uint32_t pin = ArmorLinkSecurity::getPin();
-      esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
-      esp_ble_io_cap_t iocap = ESP_IO_CAP_OUT;
-
-      esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &pin, sizeof(uint32_t));
-      esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
-      esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
+  BLEDevice::setSecurityCallbacks(new SecurityCallbackBridge());
+  uint32_t pin = ArmorLinkSecurity::getPin();
+  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
+  esp_ble_io_cap_t iocap = ESP_IO_CAP_OUT;
+  uint8_t key_size = 16;
+  uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+  uint8_t rsp_key  = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &pin, sizeof(pin));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(rsp_key));
     } else {
       Serial.println("?? Starte BLE im SETUP MODE (ohne PIN)");
     }
@@ -113,6 +118,10 @@ public:
 
   // Wird in ArmorLink.h definiert, damit es keinen Include-Zirkel gibt.
   void begin(const char* deviceName, const char* localTarget);
+
+  void setDefaultTarget(const char* target) {
+    _defaultTarget = (target != nullptr) ? String(target) : String("");
+  }
 
   bool isClientConnected() const {
     return _clientConnected;
@@ -235,6 +244,7 @@ public:
   }
 
 private:
+  String _defaultTarget;
   BLEServer* _server = nullptr;
   BLECharacteristic* _commandRxChar = nullptr;
   BLECharacteristic* _eventTxChar = nullptr;
@@ -297,12 +307,13 @@ private:
     _commandHandler->handleCommand();
   }
 
-  static void armorLinkPacketFromJsonDocument(JsonDocument& doc, ArmorLinkPacket& pkt) {
+  void armorLinkPacketFromJsonDocument(JsonDocument& doc, ArmorLinkPacket& pkt) {
     clearArmorLinkPacket(pkt);
     pkt.seq = nextArmorLinkPacketSeq();
 
     String type    = String((const char*)(doc["type"] | "command"));
-    String target  = String((const char*)(doc["target"] | "Chest"));
+    const char* fallbackTarget = _defaultTarget.isEmpty() ? "" : _defaultTarget.c_str();
+    String target  = String((const char*)(doc["target"] | fallbackTarget));
     String entity  = String((const char*)(doc["entity"] | ""));
     String command = String((const char*)(doc["command"] | ""));
     String source  = String((const char*)(doc["source"] | "App"));
@@ -374,20 +385,59 @@ private:
   };
 
   class SecurityCallbackBridge : public BLESecurityCallbacks {
-  public:
-    uint32_t onPassKeyRequest() override { return ARMORLINK_PASSKEY; }
-    void onPassKeyNotify(uint32_t) override {}
-    bool onConfirmPIN(uint32_t pass_key) override { return pass_key == ARMORLINK_PASSKEY; }
-    bool onSecurityRequest() override { return true; }
 
-    void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) override {
-      if (cmpl.success) {
-        Serial.println("?? BLE Authentifizierung erfolgreich");
-      } else {
-        Serial.println("? BLE Authentifizierung fehlgeschlagen");
-      }
+public:
+
+uint32_t onPassKeyRequest() override {
+
+  uint32_t pin = ArmorLinkSecurity::getPin();
+
+  Serial.printf("[BLE] Passkey requested -> %06lu\n", (unsigned long)pin);
+
+  return pin;
+
+}
+
+  void onPassKeyNotify(uint32_t pass_key) override {
+
+    Serial.printf("[BLE] Passkey notify: %06lu\n", (unsigned long)pass_key);
+
+  }
+bool onConfirmPIN(uint32_t pass_key) override {
+
+  uint32_t pin = ArmorLinkSecurity::getPin();
+
+  Serial.printf("[BLE] Confirm PIN: received=%06lu expected=%06lu\n",
+
+                (unsigned long)pass_key,
+
+                (unsigned long)pin);
+
+  return pass_key == pin;
+
+}
+
+  bool onSecurityRequest() override {
+
+    return true;
+
+  }
+
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) override {
+
+    if (cmpl.success) {
+
+      Serial.println("?? BLE Authentifizierung erfolgreich");
+
+    } else {
+
+      Serial.println("? BLE Authentifizierung fehlgeschlagen");
+
     }
-  };
+
+  }
+
+};
 };
 
 inline ArmorLinkBleRuntime ArmorLinkBLE;

@@ -179,8 +179,7 @@ public:
     }
 
     if (_options.defaultLogTarget.isEmpty()) {
-      _options.defaultLogTarget = "Chest";
-      Serial.println("[PAIR] Fallback defaultLogTarget=Chest");
+      Serial.println("[PAIR] No defaultLogTarget configured; remote logging/telemetry waits for a paired gateway");
     }
 
     initStartupHelloState();
@@ -297,11 +296,32 @@ void setGatewayMode(bool enabled) {
   }
 void onBleConnected() {
   if (_options.enableSerialLogging) {
-    Serial.println("[BLE] Client connected -> emitting module presence snapshot");
+    Serial.println("[BLE] Client connected -> emitting gateway descriptor and module presence snapshot");
   }
 
+  emitGatewayDescriptorEvent();
   emitModulePresenceSnapshot();
 }
+  void emitGatewayDescriptorEvent() {
+    if (_module == nullptr || !_isGatewayMode || !isBleClientConnected()) {
+      return;
+    }
+
+    StaticJsonDocument<512> doc;
+    doc["type"] = "gateway_descriptor";
+
+    JsonObject module = doc.createNestedObject("module");
+    module["name"] = _module->name();
+    module["type"] = moduleTypeToString(_module->type());
+    module["mac"] = localMacString();
+    module["isGateway"] = true;
+
+    doc["bleName"] = _options.bleName;
+
+    String out;
+    serializeJson(doc, out);
+    bleNotifyEventJson(out);
+  }
 
 void onBleDisconnected() {
   if (_options.enableSerialLogging) {
@@ -740,6 +760,10 @@ void onBleDisconnected() {
       String out;
       serializeJson(doc, out);
       notifyEventJson(out);
+
+      if (_isGatewayMode) {
+        emitGatewayDescriptorEvent();
+      }
       return true;
     }
 
@@ -2290,48 +2314,68 @@ void emitModulePresenceSnapshot() {
   }
 
   void sendSimpleLog(ArmorLinkLogLevel level, const String& message) {
-  const char* levelName = armorLinkLogLevelToString(level);
+    const char* levelName = armorLinkLogLevelToString(level);
 
-  if (_options.enableSerialLogging) {
-    Serial.printf("[%s] %s\n", levelName, message.c_str());
+    if (_options.enableSerialLogging) {
+      Serial.printf("[%s] %s\n", levelName, message.c_str());
+    }
+
+    if (!_remoteLoggingEnabled && !_options.forceRemoteLogging) {
+      Serial.println("[LOGS] Remote logging blocked: disabled");
+      return;
+    }
+
+    if (_isGatewayMode && isBleLogStreamEnabled()) {
+      const char* sourceName = (_module != nullptr) ? _module->name().c_str() : "ArmorLink";
+
+      StaticJsonDocument<384> doc;
+      doc["type"] = "log";
+      doc["level"] = levelName;
+      doc["source"] = sourceName;
+      doc["entity"] = "log";
+      doc["command"] = "message";
+      doc["message"] = message;
+      doc["valueInt"] = static_cast<int32_t>(millis());
+      doc["valueFloat"] = 0.0f;
+      doc["batteryVoltage"] = 0.0f;
+
+      String out;
+      serializeJson(doc, out);
+      bleNotifyLogJson(out);
+      return;
+    }
+
+    if (_options.defaultLogTarget.isEmpty()) {
+      Serial.println("[LOGS] Remote logging blocked: defaultLogTarget empty");
+      return;
+    }
+
+    if (level < _remoteLogLevel) {
+      Serial.println("[LOGS] Remote logging blocked: level below threshold");
+      return;
+    }
+    if (!shouldSendRemoteLog(level)) {
+      return;
+    }
+    const char* sourceName = (_module != nullptr) ? _module->name().c_str() : "ArmorLink";
+
+    Serial.printf("[LOGS] Sending to target: %s\n", _options.defaultLogTarget.c_str());
+
+    esp_err_t result = _transport.sendLogToTarget(
+      _options.defaultLogTarget,
+      sourceName,
+      level,
+      "log",
+      "message",
+      message,
+      static_cast<int32_t>(millis()),
+      0.0f,
+      0.0f
+    );
+
+    Serial.print("[LOGS] sendLogToTarget result: ");
+    Serial.println(esp_err_to_name(result));
   }
-
-  if (!_remoteLoggingEnabled && !_options.forceRemoteLogging) {
-    Serial.println("[LOGS] Remote logging blocked: disabled");
-    return;
-  }
-
-  if (_options.defaultLogTarget.isEmpty()) {
-    Serial.println("[LOGS] Remote logging blocked: defaultLogTarget empty");
-    return;
-  }
-
-  if (level < _remoteLogLevel) {
-    Serial.println("[LOGS] Remote logging blocked: level below threshold");
-    return;
-  }
-  if (!shouldSendRemoteLog(level)) {
-    return;
-  }
-  const char* sourceName = (_module != nullptr) ? _module->name().c_str() : "ArmorLink";
-
-  Serial.printf("[LOGS] Sending to target: %s\n", _options.defaultLogTarget.c_str());
-
-  esp_err_t result = _transport.sendLogToTarget(
-    _options.defaultLogTarget,
-    sourceName,
-    level,
-    "log",
-    "message",
-    message,
-    static_cast<int32_t>(millis()),
-    0.0f,
-    0.0f
-  );
-
-  Serial.print("[LOGS] sendLogToTarget result: ");
-  Serial.println(esp_err_to_name(result));
-}
 
 static void handleBleConnectedStatic() {
   ArmorLinkRuntime* self = instance();
@@ -3538,6 +3582,7 @@ private:
 };
 
 inline void ArmorLinkBleRuntime::begin(const char* deviceName, const char* localTarget) {
+  setDefaultTarget(localTarget);
   begin(deviceName, new ArmorLinkAutoBleCommandHandler(localTarget));
 }
 
