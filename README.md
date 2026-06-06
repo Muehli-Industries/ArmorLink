@@ -1,4 +1,4 @@
-# ??? ArmorLink
+# 🛡️ ArmorLink
 
 <!-- Replace with your logo once available -->
 <!-- <p align="center">
@@ -8,7 +8,7 @@
 <p align="center">
   Lightweight communication framework for ESP32 systems  
   <br>
-  Real-time � Modular � App-ready
+  Real-time • Modular • App-ready
 </p>
 
 <p align="center">
@@ -21,60 +21,60 @@
 
 ArmorLink is a lightweight communication framework for ESP32-based systems, designed for real-time interaction between hardware modules and a central gateway.
 
-Built for modular systems like wearables, robotics, and distributed control setups � but just as powerful for single-device projects.
+Built for modular systems like wearables, robotics, and distributed control setups — but just as powerful for single-device projects.
 
 ---
 
-## ? Key Capabilities
+## ✨ Key Capabilities
 
-### ? ESP-NOW Communication
+### ⚡ ESP-NOW Communication
 - Ultra low latency  
 - No WiFi infrastructure required  
 - Battery-friendly  
 
-### ?? Seamless Pairing
+### 🔐 Seamless Pairing
 - Gateway-controlled discovery  
 - Persistent pairing storage  
 
-### ?? Flexible System Design
+### 🧩 Flexible System Design
 - Single ESP32 projects  
 - Fully modular multi-device systems  
 
-### ?? Optional App Control (BLE)
+### 📡 Optional App Control (BLE)
 - Live control, logs, and configuration  
 - JSON-based protocol  
 
-### ?? Smart Logging
-- Module ? Gateway forwarding  
+### 🧠 Smart Logging
+- Module → Gateway forwarding  
 - Runtime enable / disable  
 - Log level filtering  
 
-### ?? Implicit Presence Detection
+### ❤️ Implicit Presence Detection
 - No heartbeat packets required  
 - Activity-based liveness detection  
 - Built-in timeout callbacks  
 
 ---
 
-## ??? Architecture
+## 🏗️ Architecture
 
 ### Single Device
 ```text
-[ Mobile App (optional) ] ? [ ESP32 ]
+[ Mobile App (optional) ] → [ ESP32 ]
 ```
 
 ### Modular System
 ```text
 [ Mobile App (optional) ]
-            ?
+            ↓
       [ Gateway ESP32 ]
-            ?
+            ↓
    [ Module ] [ Module ] [ Module ]
 ```
 
 ---
 
-## ?? Quick Start
+## 🚀 Quick Start
 
 ### Minimal Setup
 ```cpp
@@ -89,7 +89,7 @@ ArmorLink.begin(module, options);
 
 ---
 
-## ?? Configuration & Actions
+## ⚙️ Configuration & Actions
 
 ArmorLink modules define their own configuration and actions.  
 The app automatically adapts to it.
@@ -125,9 +125,9 @@ void setupModule() {
 
 ---
 
-## ?? App Experience
+## 📱 App Experience
 
-Your module defines how it behaves � the app adapts automatically.
+Your module defines how it behaves — the app adapts automatically.
 
 - sliders, inputs and toggles for configuration  
 - live status values  
@@ -137,7 +137,7 @@ Everything appears instantly, without building custom UI.
 
 ---
 
-## ??? UI Preview
+## 🖼️ UI Preview
 
 > *(Add screenshots later)*
 
@@ -149,37 +149,37 @@ Everything appears instantly, without building custom UI.
 
 ---
 
-## ?? Communication Flow
+## 🔄 Communication Flow
 
 ### Pairing
 ```text
-Gateway ? broadcast pairing
-Module  ? responds
-Gateway ? accepts
+Gateway → broadcast pairing
+Module  → responds
+Gateway → accepts
 ```
 
 ### Runtime
 ```text
-Module ? sends logs / state
-Gateway ? forwards to app
-App ? sends commands via BLE
-Gateway ? routes to modules
+Module → sends logs / state
+Gateway → forwards to app
+App → sends commands via BLE
+Gateway → routes to modules
 ```
 
 ---
 
-## ?? Concept
+## 🧠 Concept
 
 > One app. Any setup.
 
-Whether you control a single ESP32 or a full modular system �  
+Whether you control a single ESP32 or a full modular system —  
 the same app works out of the box.
 
 Just define your module in firmware, and you're ready to go.
 
 ---
 
-## ?? Design Goals
+## 📦 Design Goals
 
 - Minimal network overhead  
 - Battery efficiency  
@@ -188,6 +188,6 @@ Just define your module in firmware, and you're ready to go.
 
 ---
 
-## ?? License
+## 📄 License
 
 MIT License
