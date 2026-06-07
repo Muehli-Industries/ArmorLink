@@ -116,6 +116,13 @@ public:
     BLEDevice::startAdvertising();
   }
 
+  String getProjectName() const {
+    return ArmorLinkSecurity::getProjectName();
+  }
+
+  bool saveProjectName(const String& name) {
+    return ArmorLinkSecurity::saveProjectName(name);
+  }
   // Wird in ArmorLink.h definiert, damit es keinen Include-Zirkel gibt.
   void begin(const char* deviceName, const char* localTarget);
 
@@ -364,6 +371,18 @@ private:
       String configJson;
       serializeJson(doc["config"], configJson);
       setArmorLinkPacketPayload(pkt, configJson);
+    }
+
+    if (pkt.msgType == AL_MSG_COMMAND &&
+        entity.equalsIgnoreCase("security") &&
+        command.equalsIgnoreCase("set_ble_pin") &&
+        doc["projectName"].is<const char*>()) {
+      StaticJsonDocument<192> setupDoc;
+      setupDoc["projectName"] = (const char*)doc["projectName"];
+
+      String setupJson;
+      serializeJson(setupDoc, setupJson);
+      setArmorLinkPacketPayload(pkt, setupJson);
     }
   }
 

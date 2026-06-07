@@ -311,7 +311,7 @@ void onBleConnected() {
 
     StaticJsonDocument<512> doc;
     doc["type"] = "gateway_descriptor";
-
+    doc["projectName"] = ArmorLinkBLE.getProjectName();
     JsonObject module = doc.createNestedObject("module");
     module["name"] = _module->name();
     module["type"] = moduleTypeToString(_module->type());
@@ -324,7 +324,7 @@ void onBleConnected() {
     doc["armorLinkVersion"] = ARMORLINK_VERSION;
 
     String out;
-    serializeJson(doc, out);
+    serializeJson(doc, out);    
     bleNotifyEventJson(out);
   }
 
@@ -678,7 +678,9 @@ void onBleDisconnected() {
     if (!isBleLogStreamEnabled()) {
       return;
     }
-
+    if (level < _remoteLogLevel) {
+      return;
+    }
     StaticJsonDocument<384> doc;
     doc["type"] = "log";
     doc["level"] = armorLinkLogLevelToString(level);
@@ -745,6 +747,7 @@ void onBleDisconnected() {
 
   bool handleSecurityPacket(
     const ArmorLinkPacket& packet,
+    const String& payload,
     const char* securityEntity,
     void (*notifyAck)(uint16_t, const String&, const String&),
     void (*notifyError)(uint16_t, const String&, const String&),
@@ -764,9 +767,10 @@ void onBleDisconnected() {
       JsonObject security = doc.createNestedObject("security");
       security["mode"] = ArmorLinkBLE.isPinSet() ? "secure" : "setup";
       security["pinSet"] = ArmorLinkBLE.isPinSet();
+      doc["projectName"] = ArmorLinkBLE.getProjectName();
 
       String out;
-      serializeJson(doc, out);
+      serializeJson(doc, out);      
       notifyEventJson(out);
 
       if (_isGatewayMode) {
@@ -794,13 +798,19 @@ void onBleDisconnected() {
         notifyError(packet.requestId, "Weak PIN not allowed", "");
         return true;
       }
-
+      StaticJsonDocument<256> setupDoc;
+      if (deserializeJson(setupDoc, payload) == DeserializationError::Ok) {
+        const char* projectName = setupDoc["projectName"] | "";
+        if (strlen(projectName) > 0) {
+          ArmorLinkBLE.saveProjectName(String(projectName));
+        }
+      }
       if (!ArmorLinkBLE.savePin((uint32_t)pin)) {
         notifyError(packet.requestId, "Failed to save PIN", "");
         return true;
       }
 
-      notifyAck(packet.requestId, "ok", "PIN saved, restart required");
+      notifyAck(packet.requestId, "ok", "Setup saved, restart required");
 
       if (restartAfterPinSave) {
         delay(800);
@@ -1133,8 +1143,7 @@ void onBleDisconnected() {
       return ESP_OK;
     }
 
-    if (_options.defaultLogTarget.isEmpty()) {
-      Serial.println("[TELEMETRY][TX] blocked: defaultLogTarget empty");
+    if (_options.defaultLogTarget.isEmpty()) {      
       return ESP_ERR_NOT_FOUND;
     }
 
@@ -1153,10 +1162,7 @@ void onBleDisconnected() {
     setArmorLinkPacketPayload(out, payload);
 
     esp_err_t result = _transport.sendPacketToTarget(_options.defaultLogTarget, out);
-
-    Serial.printf("[TELEMETRY][TX] send to %s -> %s\n",
-                  _options.defaultLogTarget.c_str(),
-                  esp_err_to_name(result));
+    
 
     return result;
   }
@@ -1182,6 +1188,7 @@ void onBleDisconnected() {
   {
     if (handleSecurityPacket(
           packet,
+          payload,
           "security",
           notifyAck,
           notifyError,
@@ -1733,23 +1740,16 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
       equalsIgnoreCase(msg.command, "heartbeat")) {
 
     StaticJsonDocument<224> doc;
-    if (deserializeJson(doc, payload) != DeserializationError::Ok) {
-      Serial.println("[HEARTBEAT][GW] Invalid heartbeat payload");
+    if (deserializeJson(doc, payload) != DeserializationError::Ok) {      
       return true;
     }
 
     const String moduleName = String((const char*)(doc["moduleName"] | msg.source));
     const String moduleMac  = String((const char*)(doc["moduleMac"] | ""));
 
-    if (moduleMac.isEmpty()) {
-      Serial.printf("[HEARTBEAT][GW] Missing moduleMac from %s\n", msg.source);
+    if (moduleMac.isEmpty()) {      
       return true;
-    }
-
-    Serial.printf("[HEARTBEAT][GW] Heartbeat from %s (%s)\n",
-                  moduleName.c_str(),
-                  moduleMac.c_str());
-
+    }    
     updateModulePresenceByMac(moduleMac, true);
     return true;
   }
@@ -1759,23 +1759,18 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
       equalsIgnoreCase(msg.command, "sync_request")) {
 
     StaticJsonDocument<256> doc;
-    if (deserializeJson(doc, payload) != DeserializationError::Ok) {
-      Serial.println("[SYNC][GW] Invalid sync_request payload");
+    if (deserializeJson(doc, payload) != DeserializationError::Ok) {      
       return true;
     }
 
     const String moduleName = String((const char*)(doc["moduleName"] | msg.source));
     const String moduleMac  = String((const char*)(doc["moduleMac"] | ""));
 
-    if (moduleName.isEmpty() || moduleMac.isEmpty()) {
-      Serial.printf("[SYNC][GW] Missing moduleName/moduleMac from %s\n", msg.source);
+    if (moduleName.isEmpty() || moduleMac.isEmpty()) {      
       return true;
     }
 
-    Serial.printf("[SYNC][GW] State sync requested by %s (%s)\n",
-                  moduleName.c_str(),
-                  moduleMac.c_str());
-
+    
     updateModulePresenceByMac(moduleMac, true);
     sendStateSyncToModule(moduleName.c_str(), moduleMac.c_str());
     return true;
@@ -1785,8 +1780,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
         equalsIgnoreCase(msg.command, "hello_ack")) {
 
       _startupHelloAcked = true;
-      _startupHelloActive = false;
-      Serial.println("[HELLO] Received hello_ack from gateway");
+      _startupHelloActive = false;      
       return true;
     }
 
@@ -1795,8 +1789,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
       equalsIgnoreCase(msg.command, "sync_state")) {
 
     StaticJsonDocument<192> doc;
-    if (deserializeJson(doc, payload) != DeserializationError::Ok) {
-      Serial.println("[SYNC] Invalid sync_state payload");
+    if (deserializeJson(doc, payload) != DeserializationError::Ok) {      
       return true;
     }
 
@@ -1805,12 +1798,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
     _remoteTelemetryEnabled = doc["telemetryEnabled"] | false;
 
     _startupStateSyncCompleted = true;
-    _startupStateSyncActive = false;
-
-    Serial.printf("[SYNC] Applied sync_state | logs=%s | level=%s | telemetry=%s\n",
-                  _remoteLoggingEnabled ? "enabled" : "disabled",
-                  logLevelToKeyword(_remoteLogLevel),
-                  _remoteTelemetryEnabled ? "enabled" : "disabled");
+    _startupStateSyncActive = false;    
 
     return true;
   }
@@ -1821,8 +1809,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
       bool enabled = msg.valueInt != 0;
 
       _remoteTelemetryEnabled = enabled;
-
-      Serial.printf("[TELEMETRY] %s\n", enabled ? "enabled" : "disabled");
+      
       return true;
     }
     if (equalsIgnoreCase(msg.entity, "logs") &&
@@ -1834,9 +1821,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
         payload.equalsIgnoreCase("on");
 
       setRemoteLoggingEnabled(enabled);
-
-      Serial.printf("[LOGS] Remote logging %s via ESP-NOW\n",
-                    enabled ? "enabled" : "disabled");
+      
 
       if (_startupStateSyncActive) {
         _startupStateSyncCompleted = true;
@@ -1854,11 +1839,8 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
         level = logLevelFromKeyword(payload);
       }
 
-      setRemoteLogLevel(level);
-
-      Serial.printf("[LOGS] Remote log level set to %s via ESP-NOW\n",
-
-                    logLevelToKeyword(level));
+      setRemoteLogLevel(level);      
+      logLevelToKeyword(level);
 
       if (_startupStateSyncActive) {
 
@@ -1922,8 +1904,7 @@ void startupStateSyncTick() {
 
   if (sendStateSyncRequest()) {
     _lastStartupStateSyncMs = now;
-    _startupStateSyncAttempt++;
-    Serial.printf("[SYNC] Sent state sync request attempt %u\n", _startupStateSyncAttempt);
+    _startupStateSyncAttempt++;    
   }
 }
 
@@ -1961,8 +1942,7 @@ bool sendStateSyncRequest() {
   setArmorLinkPacketPayload(out, payload);
 
   esp_err_t result = _transport.sendPacketToMac(gatewayMacBytes, out);
-
-  Serial.printf("[SYNC] sendStateSyncRequest -> %s\n", esp_err_to_name(result));
+  
 
   return result == ESP_OK;
 }
@@ -2025,9 +2005,7 @@ bool sendHeartbeat() {
   );
 
   setArmorLinkPacketPayload(out, payload);
-  esp_err_t result = _transport.sendPacketToMac(gatewayMacBytes, out);
-
-  Serial.printf("[HEARTBEAT] sendHeartbeat -> %s\n", esp_err_to_name(result));
+  esp_err_t result = _transport.sendPacketToMac(gatewayMacBytes, out);  
 
   return result == ESP_OK;
 }
@@ -2056,12 +2034,7 @@ bool sendHeartbeat() {
         continue;
       }
 
-      const uint32_t silentMs = now - state.lastSeenMs;
-      Serial.printf("[PRESENCE][GW] checking %s | lastSeen=%lu | silentMs=%lu | timeoutMs=%lu\n",
-                  _pairedModules[i].name,
-                  (unsigned long)state.lastSeenMs,
-                  (unsigned long)silentMs,
-                  (unsigned long)timeoutMs);
+      const uint32_t silentMs = now - state.lastSeenMs;      
       if (silentMs < timeoutMs) {
         continue;
       }
@@ -2116,8 +2089,7 @@ void initStartupHelloState() {
     _startupStateSyncCompleted = false;
     _startupStateSyncAtMs = millis() + _options.startupStateSyncDelayMs;
     _lastStartupStateSyncMs = 0;
-    _startupStateSyncAttempt = 0;
-    Serial.println("[SYNC] Startup state sync request scheduled");
+    _startupStateSyncAttempt = 0;    
   }
 }
 
@@ -2338,12 +2310,15 @@ void emitModulePresenceSnapshot() {
       Serial.printf("[%s] %s\n", levelName, message.c_str());
     }
 
-    if (!_remoteLoggingEnabled && !_options.forceRemoteLogging) {
-      Serial.println("[LOGS] Remote logging blocked: disabled");
-      return;
-    }
+      if (!_remoteLoggingEnabled && !_options.forceRemoteLogging) {        
+        return;
+      }
 
-    if (_isGatewayMode && isBleLogStreamEnabled()) {
+      if (level < _remoteLogLevel) {        
+        return;
+      }
+
+      if (_isGatewayMode && isBleLogStreamEnabled()) {
       const char* sourceName = (_module != nullptr) ? _module->name().c_str() : "ArmorLink";
 
       StaticJsonDocument<384> doc;
@@ -2363,21 +2338,16 @@ void emitModulePresenceSnapshot() {
       return;
     }
 
-    if (_options.defaultLogTarget.isEmpty()) {
-      Serial.println("[LOGS] Remote logging blocked: defaultLogTarget empty");
+    if (_options.defaultLogTarget.isEmpty()) {      
       return;
     }
 
-    if (level < _remoteLogLevel) {
-      Serial.println("[LOGS] Remote logging blocked: level below threshold");
-      return;
-    }
+
     if (!shouldSendRemoteLog(level)) {
       return;
     }
     const char* sourceName = (_module != nullptr) ? _module->name().c_str() : "ArmorLink";
-
-    Serial.printf("[LOGS] Sending to target: %s\n", _options.defaultLogTarget.c_str());
+    
 
     esp_err_t result = _transport.sendLogToTarget(
       _options.defaultLogTarget,
@@ -2390,8 +2360,7 @@ void emitModulePresenceSnapshot() {
       0.0f,
       0.0f
     );
-
-    Serial.print("[LOGS] sendLogToTarget result: ");
+    
     Serial.println(esp_err_to_name(result));
   }
 
@@ -2786,13 +2755,7 @@ emitPairingLinkedEvent(gatewayName, gatewayMac);
   const uint8_t broadcastMac[6] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
   };
-  esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);
-
-  Serial.printf("[SYNC][GW] sync_state -> %s (%s): %s | %s\n",
-                moduleName,
-                moduleMac,
-                esp_err_to_name(result),
-                payload.c_str());
+  esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);  
 }
 
 void syncLoggingStateToModule(const char* moduleName, const char* moduleMac) {
@@ -2809,8 +2772,7 @@ void syncLoggingStateToModule(const char* moduleName, const char* moduleMac) {
   _loggingSyncStage = 0;
   _loggingSyncPending = true;
   _loggingSyncAtMs = millis() + 1000;
-
-  Serial.printf("[LOGS] Scheduled logging state sync to %s (%s)\n", moduleName, moduleMac);
+  
 }
 
 void loggingSyncTick() {
@@ -2836,11 +2798,7 @@ void loggingSyncTick() {
     out.valueInt = _remoteLoggingEnabled ? 1 : 0;
     setArmorLinkPacketPayload(out, _remoteLoggingEnabled ? "true" : "false");
 
-    esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);
-    Serial.printf("[LOGS] Broadcast sync set_enabled for %s (%s): %s\n",
-                  _loggingSyncModuleName,
-                  _loggingSyncModuleMac,
-                  esp_err_to_name(result));
+    esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);    
 
     _loggingSyncStage = 1;
     _loggingSyncAtMs = now + 250;
@@ -2861,17 +2819,10 @@ void loggingSyncTick() {
     out.valueInt = _remoteLogLevel;
     setArmorLinkPacketPayload(out, logLevelToKeyword(_remoteLogLevel));
 
-    esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);
-    Serial.printf("[LOGS] Broadcast sync set_level for %s (%s): %s\n",
-                  _loggingSyncModuleName,
-                  _loggingSyncModuleMac,
-                  esp_err_to_name(result));
+    esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);    
 
     _loggingSyncPending = false;
-    _loggingSyncStage = 0;
-    Serial.printf("[LOGS] Synced logging state to %s (%s)\n",
-                  _loggingSyncModuleName,
-                  _loggingSyncModuleMac);
+    _loggingSyncStage = 0;    
     return;
   }
 
@@ -3243,11 +3194,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         bleNotifyLogJson(out);
         break;
       }
-      case AL_MSG_TELEMETRY: {
-        Serial.printf("[TELEMETRY][GW] received from=%s entity=%s command=%s\n",
-              msg.source,
-              msg.entity,
-              msg.command);
+      case AL_MSG_TELEMETRY: {        
         String payload = armorLinkPacketPayloadToString(msg);
 
         StaticJsonDocument<384> inDoc;
@@ -3274,8 +3221,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         }
 
         String out;
-        serializeJson(doc, out);
-        Serial.printf("[TELEMETRY][GW] BLE notify: %s\n", out.c_str());
+        serializeJson(doc, out);        
         bleNotifyEventJson(out);
         break;
       }
