@@ -392,6 +392,17 @@ private:
 
 class ArmorLinkModule {
 public:
+  template <size_t NameN>
+  ArmorLinkModule(const char (&name)[NameN],
+                  ArmorLinkModuleType type = ArmorLinkModuleType::Generic,
+                  const String& version = "1.0")
+      : _name(name),
+        _type(type),
+        _version(version.isEmpty() ? "1.0" : version) {
+    static_assert(NameN <= 16,
+                  "ArmorLink module name max length is 15 characters. Use a shorter technical name.");
+  }
+
   ArmorLinkModule(const String& name,
                   ArmorLinkModuleType type = ArmorLinkModuleType::Generic,
                   const String& version = "1.0")

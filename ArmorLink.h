@@ -1677,6 +1677,16 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
                 eventJson.c_str());
 }  
   bool handleInternalEspNowCommand(const ArmorLinkPacket& msg) {
+
+    Serial.printf(
+      "[RX] type=%u entity='%s' command='%s' target='%s' source='%s'\n",
+      msg.msgType,
+      msg.entity,
+      msg.command,
+      msg.target,
+      msg.source
+    );
+
     if (msg.msgType != AL_MSG_COMMAND) {
       return false;
     }
@@ -1795,13 +1805,22 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
     return true;
   }
     if (!_isGatewayMode &&
-        equalsIgnoreCase(msg.entity, "system") &&
-        equalsIgnoreCase(msg.command, "hello_ack")) {
+    equalsIgnoreCase(msg.entity, "system") &&
+    equalsIgnoreCase(msg.command, "hello_ack")) {
 
-      _startupHelloAcked = true;
-      _startupHelloActive = false;      
-      return true;
-    }
+  Serial.printf(
+    "[HELLO] hello_ack received target='%s' source='%s'\n",
+    msg.target,
+    msg.source
+  );
+
+  _startupHelloAcked = true;
+  _startupHelloActive = false;
+
+  Serial.println("[HELLO] Startup hello acknowledged");
+
+  return true;
+}
 
   if (!_isGatewayMode &&
       equalsIgnoreCase(msg.entity, "system") &&
