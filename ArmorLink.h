@@ -1010,6 +1010,27 @@ void onBleDisconnected() {
       return true;
     }
 
+  if (packet.msgType == AL_MSG_CONFIG_SET &&
+      equalsIgnoreCase(packet.target, localTarget)) {
+
+    auto configResult = _dispatch.handleConfigSet(
+      String(packet.entity),
+      String(packet.command),
+      static_cast<int32_t>(packet.valueInt));
+
+    if (configResult == ArmorLinkDispatchResult::Ok) {
+      notifyAck(packet.requestId, "ok", "Config updated");
+      return true;
+    }
+
+    notifyError(
+      packet.requestId,
+      "Config update failed",
+      String(ArmorLinkDispatch::toString(configResult)));
+
+    return true;
+  }
+
     if (packet.msgType == AL_MSG_CONFIG_SET &&
         !equalsIgnoreCase(packet.target, localTarget)) {
 
