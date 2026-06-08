@@ -1284,6 +1284,48 @@ void serialMenuTick() {
   }
 }
 
+  void updateStoredModuleMetadataByMac(
+    const String& macText,
+    const String& moduleName,
+    const String& moduleVersion,
+    const String& armorLinkVersion)
+  {
+    if (!_isGatewayMode || macText.isEmpty()) {
+      return;
+    }
+
+    bool changed = false;
+
+    for (size_t i = 0; i < _pairedModuleCount && i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
+      if (!macText.equalsIgnoreCase(_pairedModules[i].mac)) {
+        continue;
+      }
+
+      if (!moduleName.isEmpty() && !moduleName.equals(_pairedModules[i].name)) {
+        armorlinkCopyString(_pairedModules[i].name, sizeof(_pairedModules[i].name), moduleName.c_str());
+        changed = true;
+      }
+
+      const char* finalModuleVersion = moduleVersion.isEmpty() ? "1.0" : moduleVersion.c_str();
+      if (!String(_pairedModules[i].moduleVersion).equals(finalModuleVersion)) {
+        armorlinkCopyString(_pairedModules[i].moduleVersion, sizeof(_pairedModules[i].moduleVersion), finalModuleVersion);
+        changed = true;
+      }
+
+      if (!String(_pairedModules[i].armorLinkVersion).equals(armorLinkVersion)) {
+        armorlinkCopyString(_pairedModules[i].armorLinkVersion, sizeof(_pairedModules[i].armorLinkVersion), armorLinkVersion.c_str());
+        changed = true;
+      }
+
+      if (changed) {
+        _storage.savePairedModules(_pairedModules, _pairedModuleCount);
+        emitModulePresenceEvent(_pairedModules[i], _presenceStates[i].isOnline, 0);
+      }
+
+      return;
+    }
+  }
+
 void handleSerialMenuCommand(String line) {
   line.trim();
 
@@ -1761,6 +1803,8 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
 
       const String moduleName = String((const char*)(doc["mn"] | doc["moduleName"] | ""));
       const String moduleMac  = String((const char*)(doc["mm"] | doc["moduleMac"] | ""));
+      const String moduleVersion = String((const char*)(doc["mv"] | doc["moduleVersion"] | "1.0"));
+      const String armorLinkVersion = String((const char*)(doc["av"] | doc["armorLinkVersion"] | ""));
 
       if (moduleName.isEmpty() || moduleMac.isEmpty()) {
         AL_VERBOSELN("[HELLO][GW] Missing moduleName/moduleMac");
@@ -1771,7 +1815,9 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
                     moduleName.c_str(),
                     moduleMac.c_str());
 
+      updateStoredModuleMetadataByMac(moduleMac, moduleName, moduleVersion, armorLinkVersion);
       updateModulePresenceByMac(moduleMac);
+      
       sendHelloAckToModule(moduleName.c_str(), moduleMac.c_str());
       return true;
     }
@@ -1786,6 +1832,8 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
 
     const String moduleName = String((const char*)(doc["mn"] | doc["moduleName"] | msg.source));
     const String moduleMac  = String((const char*)(doc["mm"] | doc["moduleMac"] | ""));
+    const String moduleVersion = String((const char*)(doc["mv"] | doc["moduleVersion"] | "1.0"));
+    const String armorLinkVersion = String((const char*)(doc["av"] | doc["armorLinkVersion"] | ""));
 
     if (moduleMac.isEmpty()) {      
       return true;
@@ -1795,6 +1843,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
       moduleName.c_str(),
       moduleMac.c_str()
     );
+    updateStoredModuleMetadataByMac(moduleMac, moduleName, moduleVersion, armorLinkVersion);
     updateModulePresenceByMac(moduleMac, true);
     return true;
   }
@@ -1810,12 +1859,14 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
 
     const String moduleName = String((const char*)(doc["moduleName"] | msg.source));
     const String moduleMac  = String((const char*)(doc["moduleMac"] | ""));
+    const String moduleVersion = String((const char*)(doc["mv"] | doc["moduleVersion"] | "1.0"));
+    const String armorLinkVersion = String((const char*)(doc["av"] | doc["armorLinkVersion"] | ""));
 
     if (moduleName.isEmpty() || moduleMac.isEmpty()) {      
       return true;
     }
 
-    
+    updateStoredModuleMetadataByMac(moduleMac, moduleName, moduleVersion, armorLinkVersion);
     updateModulePresenceByMac(moduleMac, true);
     sendStateSyncToModule(moduleName.c_str(), moduleMac.c_str());
     return true;
