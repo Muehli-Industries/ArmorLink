@@ -470,14 +470,11 @@ void onBleDisconnected() {
 
     String payload;
     {
-      StaticJsonDocument<256> doc;
-      doc["sessionId"] = _pendingCandidates[index].sessionId;
-      doc["gatewayName"] = (_module != nullptr) ? _module->name() : "Gateway";
-      doc["gatewayType"] = (_module != nullptr) ? moduleTypeToString(_module->type()) : "Generic";
-      doc["gatewayMac"] = localMacString();
-      doc["gatewayModuleVersion"] = (_module != nullptr) ? _module->version() : "1.0";
-      doc["gatewayArmorLinkVersion"] = ARMORLINK_VERSION;
-      doc["recoveryPin"] = _pairingInfo.recoveryPin;
+      StaticJsonDocument<160> doc;
+      doc["sid"] = _pendingCandidates[index].sessionId;
+      doc["gn"] = (_module != nullptr) ? _module->name() : "Gateway";
+      doc["gm"] = localMacString();
+      doc["rp"] = _pairingInfo.recoveryPin;
       serializeJson(doc, payload);
     }
 
@@ -775,6 +772,7 @@ void onBleDisconnected() {
 
       if (_isGatewayMode) {
         emitGatewayDescriptorEvent();
+        emitModulePresenceSnapshot();
       }
       return true;
     }
@@ -1810,8 +1808,14 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
       equalsIgnoreCase(msg.command, "sync_state")) {
 
     StaticJsonDocument<192> doc;
-    if (deserializeJson(doc, payload) != DeserializationError::Ok) {      
-      return true;
+    auto err = deserializeJson(
+        doc,
+        armorLinkPacketPayloadToString(msg));
+    if (err != DeserializationError::Ok)
+    {
+        Serial.print("[PAIR] JSON parse failed: ");
+        Serial.println(err.c_str());
+        return true;
     }
 
     _remoteLoggingEnabled = doc["loggingEnabled"] | false;
@@ -2238,13 +2242,16 @@ void emitModulePresenceSnapshot() {
   if (!_isGatewayMode) {
     return;
   }
-
+  Serial.printf("[PRESENCE] Snapshot start. pairedModuleCount=%u\n",
+                  (unsigned)_pairedModuleCount);
   const uint32_t now = millis();
   const uint32_t timeoutMs = _options.moduleTimeoutMs;
 
   for (size_t i = 0; i < _pairedModuleCount && i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
     ArmorLinkModulePresenceState& state = _presenceStates[i];
-
+    Serial.printf("[PRESENCE] Emitting %s (%s)\n",
+              _pairedModules[i].name,
+              _pairedModules[i].mac);
     if (!state.occupied) {
       continue;
     }
@@ -2276,7 +2283,7 @@ void emitModulePresenceSnapshot() {
     StaticJsonDocument<256> doc;
     doc["type"] = "module_presence";
     doc["status"] = isOnline ? "online" : "offline";
-    doc["silentMs"] = silentMs;
+    doc["silentMs"] = silentMs;    
 
     JsonObject mod = doc.createNestedObject("module");
     mod["name"] = module.name;
@@ -2287,6 +2294,10 @@ void emitModulePresenceSnapshot() {
 
     String out;
     serializeJson(doc, out);
+    Serial.print("[PRESENCE] BLE EVENT: ");
+    Serial.println(out);
+    Serial.print("[PRESENCE] JSON length=");
+    Serial.println(out.length());
     bleNotifyEventJson(out);
   }
   
@@ -2431,14 +2442,11 @@ static void handleBleConnectedStatic() {
 
     String payload;
     {
-      StaticJsonDocument<288> doc;
-      doc["sessionId"] = _pairingSessionId;
-      doc["gatewayName"] = _module->name();
-      doc["gatewayType"] = moduleTypeToString(_module->type());
-      doc["gatewayMac"] = localMacString();
-      doc["gatewayModuleVersion"] = _module->version();
-      doc["gatewayArmorLinkVersion"] = ARMORLINK_VERSION;
-      doc["recoveryPin"] = _pairingInfo.recoveryPin;
+      StaticJsonDocument<160> doc;
+      doc["sid"] = _pairingSessionId;
+      doc["gn"] = _module->name();      
+      doc["gm"] = localMacString();
+      doc["rp"] = _pairingInfo.recoveryPin;
       serializeJson(doc, payload);
     }
 
@@ -2469,17 +2477,23 @@ static void handleBleConnectedStatic() {
       return;
     }
 
-    StaticJsonDocument<192> doc;
-    if (deserializeJson(doc, armorLinkPacketPayloadToString(msg)) != DeserializationError::Ok) {
+    
+
+    const String announcePayload = armorLinkPacketPayloadToString(msg);
+    StaticJsonDocument<160> doc;
+    auto err = deserializeJson(doc, announcePayload);
+    if (err != DeserializationError::Ok) {
+      Serial.print("[PAIR] Announce JSON parse failed: ");
+      Serial.println(err.c_str());
       return;
     }
 
     Serial.println("[PAIR] Valid announce payload parsed");
 
-    const uint16_t sessionId = doc["sessionId"] | 0;
-    const String gatewayName = String((const char*)(doc["gatewayName"] | ""));
-    const String gatewayMac  = String((const char*)(doc["gatewayMac"] | ""));
-    const uint32_t recoveryPin = doc["recoveryPin"] | 0;
+    const uint16_t sessionId = doc["sid"] | doc["sessionId"] | 0;
+    const String gatewayName = String((const char*)(doc["gn"] | doc["gatewayName"] | ""));
+    const String gatewayMac  = String((const char*)(doc["gm"] | doc["gatewayMac"] | ""));
+    const uint32_t recoveryPin = doc["rp"] | doc["recoveryPin"] | 0;
     Serial.printf("[PAIR] announce gatewayName=%s gatewayMac=%s sessionId=%u\n",
               gatewayName.c_str(),
               gatewayMac.c_str(),
@@ -2501,9 +2515,7 @@ static void handleBleConnectedStatic() {
       reply["gatewayMac"] = gatewayMac;
       reply["moduleName"] = _module->name();
       reply["moduleType"] = moduleTypeToString(_module->type());
-      reply["moduleMac"] = localMacString();
-      reply["moduleVersion"] = _module->version();
-      reply["armorLinkVersion"] = ARMORLINK_VERSION;
+      reply["moduleMac"] = localMacString();            
       serializeJson(reply, payload);
     }
 
@@ -2645,16 +2657,16 @@ static void handleBleConnectedStatic() {
       return;
     }
 
-    StaticJsonDocument<224> doc;
+    StaticJsonDocument<160> doc;
     if (deserializeJson(doc, armorLinkPacketPayloadToString(msg)) != DeserializationError::Ok) {
       return;
     }
 
     Serial.println("[PAIR] ACCEPT payload parsed");
 
-    const String gatewayName = String((const char*)(doc["gatewayName"] | ""));
-    const String gatewayMac  = String((const char*)(doc["gatewayMac"] | ""));
-    const uint32_t recoveryPin = doc["recoveryPin"] | 0;
+    const String gatewayName = String((const char*)(doc["gn"] | doc["gatewayName"] | ""));
+    const String gatewayMac  = String((const char*)(doc["gm"] | doc["gatewayMac"] | ""));
+    const uint32_t recoveryPin = doc["rp"] | doc["recoveryPin"] | 0;
 
     Serial.printf("[PAIR] gatewayName=%s gatewayMac=%s recoveryPin=%lu\n",
                   gatewayName.c_str(),
