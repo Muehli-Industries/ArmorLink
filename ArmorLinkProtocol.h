@@ -2,6 +2,7 @@
 #ifndef ARMORLINK_PROTOCOL_H
 #define ARMORLINK_PROTOCOL_H
 
+#include "ArmorLinkDebug.h"
 #include <Arduino.h>
 
 #ifndef ARMORLINK_VERSION

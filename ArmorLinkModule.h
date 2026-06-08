@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ArmorLinkDebug.h"
 #include <Arduino.h>
 #include <functional>
 #include <vector>

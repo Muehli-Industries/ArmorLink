@@ -12,7 +12,7 @@
   #include <esp_now.h>
   #include <esp_wifi.h>
 #endif
-
+#include "ArmorLinkDebug.h"
 #include <Arduino.h>
 #include <map>
 #include "ArmorLinkProtocol.h"
@@ -65,7 +65,7 @@ public:
     esp_now_recv_cb_t onReceive = nullptr,
     esp_now_send_cb_t onSent = nullptr)
   {
-    Serial.println("?? Initialisiere ESP-NOW im Raw Mode");
+    AL_VERBOSELN("?? Initialisiere ESP-NOW im Raw Mode");
 #if defined(ESP8266)
     WiFi.mode(WIFI_AP);
     if (esp_now_init() != 0) return false;
@@ -91,7 +91,7 @@ public:
   }
 
   bool beginManaged(uint8_t channel = 1) {
-    Serial.println("?? Initialisiere ESP-NOW im Managed Mode");
+    AL_VERBOSELN("?? Initialisiere ESP-NOW im Managed Mode");
 #if defined(ESP32)
 
   WiFi.mode(WIFI_STA);

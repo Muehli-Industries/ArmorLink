@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ArmorLinkDebug.h"
 #include <Arduino.h>
 #include <Preferences.h>
 #include "ArmorLinkModule.h"

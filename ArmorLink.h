@@ -1,7 +1,7 @@
 #pragma once
 #ifndef ARMORLINK_H
 #define ARMORLINK_H
-
+#include "ArmorLinkDebug.h"
 #include <ArduinoJson.h>
 #include <map>
 #if defined(ESP32)
@@ -174,14 +174,14 @@ public:
                       gatewayName.c_str(),
                       _pairingInfo.gatewayMac);
       } else {
-        Serial.println("[PAIR] ERROR: Failed to parse stored gateway MAC");
+        AL_VERBOSELN("[PAIR] ERROR: Failed to parse stored gateway MAC");
       }
     } else {
-      Serial.println("[PAIR] No valid pairing info found");
+      AL_VERBOSELN("[PAIR] No valid pairing info found");
     }
 
     if (_options.defaultLogTarget.isEmpty()) {
-      Serial.println("[PAIR] No defaultLogTarget configured; remote logging/telemetry waits for a paired gateway");
+      AL_VERBOSELN("[PAIR] No defaultLogTarget configured; remote logging/telemetry waits for a paired gateway");
     }
 
     initStartupHelloState();
@@ -200,6 +200,16 @@ public:
     {
       _transport.beginManaged(_options.espNowChannel);      
     }
+
+    Serial.printf(
+      "[INFO] ArmorLink %s loaded | module=%s | gateway=%s | ble=%s | espnow=%s | channel=%u\n",
+      ARMORLINK_VERSION,
+      _module != nullptr ? _module->name().c_str() : "unknown",
+      _options.enableGateway ? "true" : "false",
+      _options.enableBle ? "true" : "false",
+      _options.enableEspNow ? "true" : "false",
+      _options.espNowChannel
+    );
   }
 
   void loop() {
@@ -298,7 +308,7 @@ void setGatewayMode(bool enabled) {
   }
 void onBleConnected() {
   if (_options.enableSerialLogging) {
-    Serial.println("[BLE] Client connected -> emitting gateway descriptor and module presence snapshot");
+    AL_VERBOSELN("[BLE] Client connected -> emitting gateway descriptor and module presence snapshot");
   }
 
   emitGatewayDescriptorEvent();
@@ -330,7 +340,7 @@ void onBleConnected() {
 
 void onBleDisconnected() {
   if (_options.enableSerialLogging) {
-    Serial.println("[BLE] Client disconnected -> disabling BLE and remote logging");
+    AL_VERBOSELN("[BLE] Client disconnected -> disabling BLE and remote logging");
   }
 
   setBleLogStreamEnabled(false);
@@ -494,7 +504,7 @@ void onBleDisconnected() {
     esp_err_t sendResult = _transport.sendPacketToMac(moduleMac, out);
 
     Serial.print("[PAIR][GW] Pair accept send result: ");
-    Serial.println(esp_err_to_name(sendResult));
+    AL_VERBOSE(esp_err_to_name(sendResult));
 
     if (sendResult != ESP_OK) {
       return false; 
@@ -707,7 +717,7 @@ void onBleDisconnected() {
 
   void onEspNowSendStatus(const uint8_t* /*mac_addr*/, esp_now_send_status_t status) {
     Serial.print("?? Send Status: ");
-    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+    AL_VERBOSE(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
   }
 
   void processEspNowQueue() {
@@ -726,7 +736,7 @@ void onBleDisconnected() {
 #elif defined(ESP8266)
     Serial.printf("?? ESP8266 MAC: %s\n", WiFi.macAddress().c_str());
 #else
-    Serial.println("?? Local MAC unavailable on this platform");
+    AL_VERBOSELN("?? Local MAC unavailable on this platform");
 #endif
   }
 
@@ -1288,7 +1298,8 @@ void handleSerialMenuCommand(String line) {
 
   if (line.equalsIgnoreCase("start") || line.equalsIgnoreCase("startpairing")) {
     const bool ok = startPairing(30000);
-    Serial.println(ok ? "[MENU] Pairing started." : "[MENU] Pairing start failed.");
+    if (ok) Serial.println("[MENU] Pairing started.");
+    else Serial.println("[MENU] Pairing start failed.");
     return;
   }
 
@@ -1694,7 +1705,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
         equalsIgnoreCase(msg.entity, "pairing") &&
         equalsIgnoreCase(msg.command, "unpair")) {
 
-      Serial.println("[PAIR] Unpair command received");
+      AL_VERBOSELN("[PAIR] Unpair command received");
 
       _storage.clearPairingInfo();
       memset(&_pairingInfo, 0, sizeof(_pairingInfo));
@@ -1710,7 +1721,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
       _startupHelloAttempt = 0;
       _lastHeartbeatMs = 0;
 
-      Serial.println("[PAIR] Module unpaired locally");
+      AL_VERBOSELN("[PAIR] Module unpaired locally");
       return true;
     }
     if (_isGatewayMode &&
@@ -1744,15 +1755,15 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
 
       StaticJsonDocument<224> doc;
       if (deserializeJson(doc, payload) != DeserializationError::Ok) {
-        Serial.println("[HELLO][GW] Invalid hello payload");
+        AL_VERBOSELN("[HELLO][GW] Invalid hello payload");
         return true;
       }
 
-      const String moduleName = String((const char*)(doc["moduleName"] | ""));
-      const String moduleMac  = String((const char*)(doc["moduleMac"] | ""));
+      const String moduleName = String((const char*)(doc["mn"] | doc["moduleName"] | ""));
+      const String moduleMac  = String((const char*)(doc["mm"] | doc["moduleMac"] | ""));
 
       if (moduleName.isEmpty() || moduleMac.isEmpty()) {
-        Serial.println("[HELLO][GW] Missing moduleName/moduleMac");
+        AL_VERBOSELN("[HELLO][GW] Missing moduleName/moduleMac");
         return true;
       }
 
@@ -1773,12 +1784,17 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
       return true;
     }
 
-    const String moduleName = String((const char*)(doc["moduleName"] | msg.source));
-    const String moduleMac  = String((const char*)(doc["moduleMac"] | ""));
+    const String moduleName = String((const char*)(doc["mn"] | doc["moduleName"] | msg.source));
+    const String moduleMac  = String((const char*)(doc["mm"] | doc["moduleMac"] | ""));
 
     if (moduleMac.isEmpty()) {      
       return true;
     }    
+    Serial.printf(
+      "[HEARTBEAT][GW] Received from %s (%s)\n",
+      moduleName.c_str(),
+      moduleMac.c_str()
+    );
     updateModulePresenceByMac(moduleMac, true);
     return true;
   }
@@ -1817,7 +1833,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
   _startupHelloAcked = true;
   _startupHelloActive = false;
 
-  Serial.println("[HELLO] Startup hello acknowledged");
+  AL_VERBOSELN("[HELLO] Startup hello acknowledged");
 
   return true;
 }
@@ -1833,7 +1849,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
     if (err != DeserializationError::Ok)
     {
         Serial.print("[PAIR] JSON parse failed: ");
-        Serial.println(err.c_str());
+        AL_VERBOSE(err.c_str());
         return true;
     }
 
@@ -1900,6 +1916,10 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
   }
 
 void updateModulePresenceByMac(const String& macText, bool forceEmitOnlineEvent = false) {
+  Serial.printf(
+  "[PRESENCE] updateModulePresenceByMac(%s)\n",
+  macText.c_str()
+);
   if (!_isGatewayMode || macText.isEmpty()) {
     return;
   }
@@ -1916,7 +1936,11 @@ void updateModulePresenceByMac(const String& macText, bool forceEmitOnlineEvent 
   state.isOnline = true;
   state.lastSeenMs = millis();
   state.timeoutReported = false;
-
+    Serial.printf(
+      "[PRESENCE] %s marked ONLINE at %lu\n",
+      macText.c_str(),
+      (unsigned long)state.lastSeenMs
+    );
   if (index < static_cast<int>(_pairedModuleCount)) {
     if (!wasOnline && _options.syncLoggingStateOnModuleOnline) {
       syncLoggingStateToModule(_pairedModules[index].name, _pairedModules[index].mac);
@@ -1966,9 +1990,9 @@ bool sendStateSyncRequest() {
   String payload;
   {
     StaticJsonDocument<320> doc;
-    doc["moduleName"] = _module->name();
+    doc["mn"] = _module->name();
     doc["moduleType"] = moduleTypeToString(_module->type());
-    doc["moduleMac"] = localMacString();
+    doc["mm"] = localMacString();
     doc["moduleVersion"] = _module->version();
     doc["armorLinkVersion"] = ARMORLINK_VERSION;
     doc["wantLogs"] = true;
@@ -2031,12 +2055,12 @@ bool sendHeartbeat() {
   String payload;
   {
     StaticJsonDocument<288> doc;
-    doc["moduleName"] = _module->name();
+    doc["mn"] = _module->name();
     doc["moduleType"] = moduleTypeToString(_module->type());
-    doc["moduleMac"] = localMacString();
+    doc["mm"] = localMacString();
     doc["moduleVersion"] = _module->version();
     doc["armorLinkVersion"] = ARMORLINK_VERSION;
-    doc["uptimeMs"] = millis();
+    doc["up"] = millis();
     serializeJson(doc, payload);
   }
 
@@ -2050,7 +2074,13 @@ bool sendHeartbeat() {
 
   setArmorLinkPacketPayload(out, payload);
   esp_err_t result = _transport.sendPacketToMac(gatewayMacBytes, out);  
-
+  Serial.printf(
+    "[HEARTBEAT] Sent -> gateway=%s (%s) payloadLen=%u result=%s\n",
+    _pairingInfo.gatewayName,
+    _pairingInfo.gatewayMac,
+    out.payloadLen,
+    esp_err_to_name(result)
+  );
   return result == ESP_OK;
 }
   void presenceTick() {    
@@ -2071,7 +2101,10 @@ bool sendHeartbeat() {
     }
 
     _lastPresenceCheckMs = now;
-    
+    Serial.printf(
+      "[PRESENCE] Check running. paired=%u\n",
+      (unsigned)_pairedModuleCount
+    );
     for (size_t i = 0; i < _pairedModuleCount && i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
       ArmorLinkModulePresenceState& state = _presenceStates[i];
       if (!state.occupied || !state.isOnline) {
@@ -2082,7 +2115,12 @@ bool sendHeartbeat() {
       if (silentMs < timeoutMs) {
         continue;
       }
-
+      Serial.printf(
+        "[PRESENCE] TIMEOUT %s silent=%lu ms timeout=%lu ms\n",
+        _pairedModules[i].name,
+        (unsigned long)silentMs,
+        (unsigned long)timeoutMs
+      );
       state.isOnline = false;
 
       if (!state.timeoutReported) {
@@ -2127,7 +2165,7 @@ void initStartupHelloState() {
   _lastStartupHelloMs = 0;
   _startupHelloAttempt = 0;
 
-  Serial.println("[HELLO] Startup hello activated");
+  AL_VERBOSELN("[HELLO] Startup hello activated");
   if (_options.requestStateSyncAfterBoot) {
     _startupStateSyncActive = true;
     _startupStateSyncCompleted = false;
@@ -2165,7 +2203,7 @@ void startupHelloTick() {
 
   if ((int32_t)(now - _startupHelloUntilMs) >= 0) {
     _startupHelloActive = false;
-    Serial.println("[HELLO] Startup hello window expired");
+    AL_VERBOSELN("[HELLO] Startup hello window expired");
     return;
   }
 
@@ -2199,9 +2237,9 @@ bool sendStartupHello() {
   String payload;
   {
     StaticJsonDocument<288> doc;
-    doc["moduleName"] = _module->name();
+    doc["mn"] = _module->name();
     doc["moduleType"] = moduleTypeToString(_module->type());
-    doc["moduleMac"] = localMacString();
+    doc["mm"] = localMacString();
     doc["moduleVersion"] = _module->version();
     doc["armorLinkVersion"] = ARMORLINK_VERSION;
     serializeJson(doc, payload);
@@ -2219,7 +2257,7 @@ bool sendStartupHello() {
   esp_err_t result = _transport.sendPacketToMac(gatewayMacBytes, out);
 
   Serial.print("[HELLO] sendStartupHello result: ");
-  Serial.println(esp_err_to_name(result));
+  AL_VERBOSE(esp_err_to_name(result));
 
   return result == ESP_OK;
 }
@@ -2313,10 +2351,9 @@ void emitModulePresenceSnapshot() {
 
     String out;
     serializeJson(doc, out);
-    Serial.print("[PRESENCE] BLE EVENT: ");
-    Serial.println(out);
-    Serial.print("[PRESENCE] JSON length=");
-    Serial.println(out.length());
+    AL_VERBOSE("[PRESENCE] BLE EVENT: %s\n", out.c_str());
+
+    AL_VERBOSE("[PRESENCE] JSON length=%u\n", static_cast<unsigned>(out.length()));
     bleNotifyEventJson(out);
   }
   
@@ -2327,7 +2364,7 @@ void emitModulePresenceSnapshot() {
     }
 
     if (_pairingSessionId == 0 || _pairingEndsAtMs == 0) {
-      Serial.println("[PAIR][GW] Invalid pairing state detected -> reset");
+      AL_VERBOSELN("[PAIR][GW] Invalid pairing state detected -> reset");
       _pairingActive = false;
       _pairingEndsAtMs = 0;
       _pairingSessionId = 0;
@@ -2412,7 +2449,7 @@ void emitModulePresenceSnapshot() {
       0.0f
     );
     
-    Serial.println(esp_err_to_name(result));
+    AL_VERBOSE(esp_err_to_name(result));
   }
 
 static void handleBleConnectedStatic() {
@@ -2484,15 +2521,15 @@ static void handleBleConnectedStatic() {
   }
 
   void handlePairAnnouncePacket(const ArmorLinkPacket& msg) {
-    Serial.println("[PAIR] Announce packet received");
+    AL_VERBOSELN("[PAIR] Announce packet received");
 
     if (_isGatewayMode || _module == nullptr) {
-      Serial.println("[PAIR] Ignored: gateway mode or no module");
+      AL_VERBOSELN("[PAIR] Ignored: gateway mode or no module");
       return;
     }
 
     if (_pairingInfo.paired) {
-      Serial.println("[PAIR] Ignored: module already paired");
+      AL_VERBOSELN("[PAIR] Ignored: module already paired");
       return;
     }
 
@@ -2503,11 +2540,11 @@ static void handleBleConnectedStatic() {
     auto err = deserializeJson(doc, announcePayload);
     if (err != DeserializationError::Ok) {
       Serial.print("[PAIR] Announce JSON parse failed: ");
-      Serial.println(err.c_str());
+      AL_VERBOSE(err.c_str());
       return;
     }
 
-    Serial.println("[PAIR] Valid announce payload parsed");
+    AL_VERBOSELN("[PAIR] Valid announce payload parsed");
 
     const uint16_t sessionId = doc["sid"] | doc["sessionId"] | 0;
     const String gatewayName = String((const char*)(doc["gn"] | doc["gatewayName"] | ""));
@@ -2518,12 +2555,12 @@ static void handleBleConnectedStatic() {
               gatewayMac.c_str(),
               sessionId);
     if (sessionId == 0 || gatewayName.isEmpty() || gatewayMac.isEmpty()) {
-      Serial.println("[PAIR] Ignored: invalid announce payload");
+      AL_VERBOSELN("[PAIR] Ignored: invalid announce payload");
       return;
     }
 
     if (_lastRespondedPairSessionId == sessionId) {
-      Serial.println("[PAIR] Ignored: already responded to this session");
+      AL_VERBOSELN("[PAIR] Ignored: already responded to this session");
       return;
     }
 
@@ -2557,7 +2594,7 @@ static void handleBleConnectedStatic() {
     if (armorLinkParseMacString(gatewayMac, gatewayMacBytes)) {
       unicastResult = _transport.sendPacketToMac(gatewayMacBytes, out);
     } else {
-      Serial.println("[PAIR] Invalid gateway MAC in announce payload");
+      AL_VERBOSELN("[PAIR] Invalid gateway MAC in announce payload");
     }
 
     delay(20);
@@ -2580,37 +2617,37 @@ static void handleBleConnectedStatic() {
   }
 
   void handlePairResponsePacket(const ArmorLinkPacket& msg) {
-    Serial.println("[PAIR][GW] handlePairResponsePacket entered");
+    AL_VERBOSELN("[PAIR][GW] handlePairResponsePacket entered");
 
     if (!_isGatewayMode) {
-      Serial.println("[PAIR][GW] Ignored: gateway mode is false");
+      AL_VERBOSELN("[PAIR][GW] Ignored: gateway mode is false");
       return;
     }
 
     if (!_pairingActive) {
-      Serial.println("[PAIR][GW] Ignored: pairing is not active");
+      AL_VERBOSELN("[PAIR][GW] Ignored: pairing is not active");
       return;
     }
 
     if ((int32_t)(millis() - _pairingEndsAtMs) >= 0) {
-      Serial.println("[PAIR][GW] Ignored: pairing timeout reached");
+      AL_VERBOSELN("[PAIR][GW] Ignored: pairing timeout reached");
       stopPairing();
       return;
     }
 
     StaticJsonDocument<320> doc;
     if (deserializeJson(doc, armorLinkPacketPayloadToString(msg)) != DeserializationError::Ok) {
-      Serial.println("[PAIR][GW] JSON parse failed");
+      AL_VERBOSELN("[PAIR][GW] JSON parse failed");
       return;
     }
 
-    Serial.println("[PAIR][GW] JSON parse ok");
+    AL_VERBOSELN("[PAIR][GW] JSON parse ok");
 
     const String responseGatewayMac = String((const char*)(doc["gatewayMac"] | ""));
     const String localGatewayMac = localMacString();
 
     if (responseGatewayMac.isEmpty()) {
-      Serial.println("[PAIR][GW] ignored: response missing gatewayMac");
+      AL_VERBOSELN("[PAIR][GW] ignored: response missing gatewayMac");
       return;
     }
 
@@ -2628,7 +2665,7 @@ static void handleBleConnectedStatic() {
                   _pairingSessionId);
 
     if (sessionId != _pairingSessionId) {
-      Serial.println("[PAIR][GW] Ignored: session mismatch");
+      AL_VERBOSELN("[PAIR][GW] Ignored: session mismatch");
       return;
     }
 
@@ -2665,12 +2702,12 @@ static void handleBleConnectedStatic() {
     armorlinkCopyString(_pendingCandidates[index].armorLinkVersion, sizeof(_pendingCandidates[index].armorLinkVersion), armorLinkVersion);
 
     rebuildPendingCandidateCount();
-    Serial.println("[PAIR][GW] Emitting pairing_candidate BLE event");
+    AL_VERBOSELN("[PAIR][GW] Emitting pairing_candidate BLE event");
     emitPairingCandidateEvent(_pendingCandidates[index]);
   }
 
   void handlePairAcceptPacket(const ArmorLinkPacket& msg) {
-    Serial.println("[PAIR] ACCEPT packet received");
+    AL_VERBOSELN("[PAIR] ACCEPT packet received");
     initStartupHelloState();
     if (_isGatewayMode || _module == nullptr) {
       return;
@@ -2681,7 +2718,7 @@ static void handleBleConnectedStatic() {
       return;
     }
 
-    Serial.println("[PAIR] ACCEPT payload parsed");
+    AL_VERBOSELN("[PAIR] ACCEPT payload parsed");
 
     const String gatewayName = String((const char*)(doc["gn"] | doc["gatewayName"] | ""));
     const String gatewayMac  = String((const char*)(doc["gm"] | doc["gatewayMac"] | ""));
@@ -2701,18 +2738,18 @@ static void handleBleConnectedStatic() {
     armorlinkCopyString(_pairingInfo.gatewayMac, sizeof(_pairingInfo.gatewayMac), gatewayMac);
     _pairingInfo.recoveryPin = recoveryPin;
     _storage.savePairingInfo(_pairingInfo);
-    Serial.println("[PAIR] Pairing info saved");
+    AL_VERBOSELN("[PAIR] Pairing info saved");
 
     uint8_t macBytes[6];
 if (armorLinkParseMacString(gatewayMac, macBytes)) {
   _peers.registerPeer(gatewayName, macBytes);
-  Serial.println("[PAIR] Gateway peer registered");
+  AL_VERBOSELN("[PAIR] Gateway peer registered");
   _options.defaultLogTarget = gatewayName;
 }
 
 initStartupHelloState();
 _lastHeartbeatMs = 0;
-Serial.println("[PAIR] Module is now paired");
+AL_VERBOSELN("[PAIR] Module is now paired");
 emitPairingLinkedEvent(gatewayName, gatewayMac);
   }
 

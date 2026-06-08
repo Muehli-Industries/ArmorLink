@@ -2,6 +2,7 @@
 #ifndef ARMORLINK_BLE_H
 #define ARMORLINK_BLE_H
 
+#include "ArmorLinkDebug.h"
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -50,7 +51,7 @@ public:
     BLEDevice::init(deviceName);
 
     if (ArmorLinkSecurity::isPinSet()) {
-      Serial.println("?? Starte BLE im SECURE MODE");
+      AL_VERBOSELN("?? Starte BLE im SECURE MODE");
 
       BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
 
@@ -68,7 +69,7 @@ public:
   esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
   esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(rsp_key));
     } else {
-      Serial.println("?? Starte BLE im SETUP MODE (ohne PIN)");
+      AL_VERBOSELN("?? Starte BLE im SETUP MODE (ohne PIN)");
     }
 
     _server = BLEDevice::createServer();
@@ -263,7 +264,7 @@ private:
 
   void onConnected() {
     _clientConnected = true;
-    Serial.println("?? BLE Client verbunden");
+    AL_VERBOSELN("?? BLE Client verbunden");
 
     if (g_armorLinkBleConnectHook != nullptr) {
       g_armorLinkBleConnectHook();
@@ -273,7 +274,7 @@ private:
   void onDisconnected() {
     _clientConnected = false;
     _logStreamEnabled = false;
-    Serial.println("?? BLE Client getrennt");  
+    AL_VERBOSELN("?? BLE Client getrennt");  
     if (g_armorLinkBleDisconnectHook != nullptr) {
       g_armorLinkBleDisconnectHook();
     }  
@@ -446,11 +447,11 @@ bool onConfirmPIN(uint32_t pass_key) override {
 
     if (cmpl.success) {
 
-      Serial.println("?? BLE Authentifizierung erfolgreich");
+      AL_VERBOSELN("?? BLE Authentifizierung erfolgreich");
 
     } else {
 
-      Serial.println("? BLE Authentifizierung fehlgeschlagen");
+      AL_VERBOSELN("? BLE Authentifizierung fehlgeschlagen");
 
     }
 

@@ -2,6 +2,7 @@
 #ifndef ARMORLINK_SECURITY_H
 #define ARMORLINK_SECURITY_H
 
+#include "ArmorLinkDebug.h"
 #include <Arduino.h>
 #include <Preferences.h>
 
