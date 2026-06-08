@@ -167,19 +167,6 @@ public:
     _field.nvsKey = key;
     return *this;
   }
-  template <size_t EntityN, size_t CommandN>
-  ArmorLinkConfigFieldBuilder& command(const char (&entity)[EntityN], const char (&command)[CommandN]) {
-    static_assert(EntityN <= ARMORLINK_ENTITY_MAX_LEN + 1,
-                  "ArmorLink config command entity max length is 23 characters.");
-    static_assert(CommandN <= ARMORLINK_COMMAND_MAX_LEN + 1,
-                  "ArmorLink config command name max length is 23 characters.");
-    return this->command(String(entity), String(command));
-  }
-  ArmorLinkConfigFieldBuilder& command(const String& entity, const String& command) {
-    _field.entity = entity;
-    _field.command = command;
-    return *this;
-  }
 
   ArmorLinkConfigFieldBuilder& readonly() {
     _field.editable = false;
