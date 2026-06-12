@@ -6,7 +6,7 @@
 #include <Arduino.h>
 
 #ifndef ARMORLINK_VERSION
-#define ARMORLINK_VERSION "0.5.0"
+#define ARMORLINK_VERSION "0.3.0"
 #endif
 
 static constexpr uint8_t  ARMORLINK_PROTOCOL_VERSION = 2;
