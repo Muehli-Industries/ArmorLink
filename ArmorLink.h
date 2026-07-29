@@ -213,6 +213,7 @@ public:
   }
 
   void loop() {
+    bleProcessPendingConfigTransfer();
     processEspNowQueue();
     pairingTick();
     presenceTick();
@@ -986,7 +987,23 @@ void onBleDisconnected() {
         equalsIgnoreCase(packet.target, localTarget)) {
 
       String json = buildDescriptor();
-      bleNotifyConfigJsonChunked(localTarget, "", packet.requestId, json, false);
+
+      const bool queued = bleQueueConfigJsonChunked(
+        localTarget,
+        "",
+        packet.requestId,
+        json,
+        false
+      );
+
+      if (!queued) {
+        notifyError(
+          packet.requestId,
+          "Config transfer busy",
+          ""
+        );
+      }
+
       return true;
     }
 
