@@ -79,6 +79,12 @@ public:
           }
           break;
 
+        case ArmorLinkFieldKind::String:
+          if (field.stringBinding.ptr) {
+            *field.stringBinding.ptr = prefs.getString(storageKey.c_str(), *field.stringBinding.ptr);
+          }
+          break;
+
         case ArmorLinkFieldKind::Readonly:
         default:
           break;
@@ -123,6 +129,13 @@ public:
       case ArmorLinkFieldKind::Bool:
         if (field.boolBinding.ptr) {
           ok = prefs.putBool(storageKey.c_str(), *field.boolBinding.ptr);
+        }
+        break;
+
+      case ArmorLinkFieldKind::String:
+        if (field.stringBinding.ptr) {
+          prefs.putString(storageKey.c_str(), *field.stringBinding.ptr);
+          ok = true;
         }
         break;
 
@@ -219,6 +232,36 @@ static String sanitizeKey(const String& input) {
     prefs.putString("pair_gw_mac", info.gatewayMac);
     prefs.putUInt("pair_rpin", info.recoveryPin);
 
+    prefs.end();
+    return true;
+  }
+
+  bool loadProfileName(String& outName) {
+    if (_namespace.isEmpty()) {
+      return false;
+    }
+
+    Preferences prefs;
+    if (!prefs.begin(_namespace.c_str(), true)) {
+      return false;
+    }
+
+    outName = prefs.getString("profile_name", "");
+    prefs.end();
+    return true;
+  }
+
+  bool saveProfileName(const String& name) {
+    if (_namespace.isEmpty()) {
+      return false;
+    }
+
+    Preferences prefs;
+    if (!prefs.begin(_namespace.c_str(), false)) {
+      return false;
+    }
+
+    prefs.putString("profile_name", name);
     prefs.end();
     return true;
   }

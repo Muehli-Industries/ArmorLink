@@ -60,6 +60,41 @@ public:
     return ArmorLinkDispatchResult::NotFound;
   }
 
+  ArmorLinkDispatchResult handleConfigSet(
+      const String& entity,
+      const String& command,
+      const String& value)
+  {
+    if (!_module) return ArmorLinkDispatchResult::NotFound;
+
+    for (auto& field : _module->config().items()) {
+      const bool explicitCommandMatch =
+        field.entity.equalsIgnoreCase(entity) &&
+        field.command.equalsIgnoreCase(command);
+
+      const bool defaultConfigMatch =
+        entity.equalsIgnoreCase("config") &&
+        field.key.equalsIgnoreCase(command);
+
+      const bool keyFallbackMatch =
+        field.key.equalsIgnoreCase(command) ||
+        field.key.equalsIgnoreCase(entity);
+
+      if (!explicitCommandMatch && !defaultConfigMatch && !keyFallbackMatch) continue;
+      if (!field.editable) return ArmorLinkDispatchResult::NotEditable;
+
+      switch (field.kind) {
+        case ArmorLinkFieldKind::String:
+          return handleString(field, value);
+
+        default:
+          return ArmorLinkDispatchResult::InvalidValue;
+      }
+    }
+
+    return ArmorLinkDispatchResult::NotFound;
+  }
+
   ArmorLinkDispatchResult handleAction(
       const String& entity,
       const String& command)
@@ -151,6 +186,24 @@ private:
 
     if (field.onBoolChange) {
       field.onBoolChange(value);
+    }
+
+    return ArmorLinkDispatchResult::Ok;
+  }
+
+  ArmorLinkDispatchResult handleString(ArmorLinkConfigFieldDef& field, const String& value) {
+    if (!field.stringBinding.ptr) {
+      return ArmorLinkDispatchResult::InvalidValue;
+    }
+
+    *field.stringBinding.ptr = value;
+
+    if (!_storage || !_storage->saveField(field)) {
+      return ArmorLinkDispatchResult::StorageError;
+    }
+
+    if (field.onStringChange) {
+      field.onStringChange(value);
     }
 
     return ArmorLinkDispatchResult::Ok;

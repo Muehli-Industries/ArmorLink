@@ -15,7 +15,15 @@
 #include "ArmorLinkTransportEspNow.h"
 #include "ArmorLinkBLE.h"
 
+#if __has_include(<ESP32Servo.h>)
+  #include <ESP32Servo.h>
+  #define ARMORLINK_HAS_ESP32_SERVO 1
+#else
+  #define ARMORLINK_HAS_ESP32_SERVO 0
+#endif
+
 struct ArmorLinkOptions {
+  String nodeName = "";
   String bleName = "ArmorLink";
   uint8_t espNowChannel = 1;
   bool enableBle = false;
@@ -33,6 +41,7 @@ struct ArmorLinkOptions {
   // Temporr noch ntig, bis Pairing/Gateway-Routing fertig ist.
   // Danach kann das intern ersetzt werden.
   String defaultLogTarget = "";
+  bool enableSerialCommands = true;
   bool enableSerialMenu = false;
   uint32_t modulePresenceCheckIntervalMs = 300000; // 5 min
   uint32_t moduleTimeoutMs = 900000;               // 15 min
@@ -133,14 +142,24 @@ public:
   void begin(ArmorLinkModule& module, const ArmorLinkOptions& options) {
     _module = &module;
     _options = options;
+    initializeSystemConfig(module, _options);
+    registerSystemConfig(module);
+
+    _storage.begin(resolveNamespace(module, options));
+    _storage.load(module);
+    applySystemConfig();
+
     if(_options.enableBle){
       ArmorLinkBLE.begin(_options.bleName.c_str(), _module->name().c_str());
     }
     
     setGatewayMode(_options.enableGateway);
 
-    _storage.begin(resolveNamespace(module, options));
-    _storage.load(module);
+    String storedProfileName;
+    if (_storage.loadProfileName(storedProfileName) &&
+        !storedProfileName.isEmpty()) {
+      module.activeProfileName(storedProfileName);
+    }
     _storage.loadPairingInfo(_pairingInfo);
     _pairedModuleCount = _storage.loadPairedModules(_pairedModules);
     syncPresenceStatesFromStoredModules();
@@ -183,7 +202,23 @@ public:
     if (_options.defaultLogTarget.isEmpty()) {
       AL_VERBOSELN("[PAIR] No defaultLogTarget configured; remote logging/telemetry waits for a paired gateway");
     }
+    if (_options.enableSerialCommands ||
+      _options.enableSerialMenu) {
+      _serialRuntime.begin(
+          Serial,
+          _module->serial()
+      );
 
+      _serialRuntime.setInternalHandler(
+          &ArmorLinkRuntime::handleFlasherSerialPayloadThunk,
+          this
+      );
+
+      _serialRuntime.setUnknownHandler(
+          &ArmorLinkRuntime::handleUnknownSerialLineThunk,
+          this
+      );
+  }
     initStartupHelloState();
 
     _dispatch.begin(&module, &_storage);
@@ -220,8 +255,9 @@ public:
     startupHelloTick();
     startupStateSyncTick();
     heartbeatTick();
-    loggingSyncTick();
-    serialMenuTick();
+    loggingSyncTick();    
+    serialTick();
+    rebootTick();
   }
 
   String buildDescriptor() const {
@@ -987,6 +1023,8 @@ void onBleDisconnected() {
         equalsIgnoreCase(packet.target, localTarget)) {
 
       String json = buildDescriptor();
+      Serial.printf("[CONFIG] local descriptor length=%u\n",
+                    static_cast<unsigned>(json.length()));
 
       const bool queued = bleQueueConfigJsonChunked(
         localTarget,
@@ -1265,41 +1303,1365 @@ private:
   ArmorLinkOptions _options;
   ArmorLinkStorage _storage;
   ArmorLinkDispatch _dispatch;
+#if ARMORLINK_HAS_ESP32_SERVO
+  Servo _serialServo;
+#endif
+  int _serialServoPin = -1;
   ArmorLinkTransportEspNow _transport;
   ArmorLinkPeerRegistry _peers;
   ArmorLinkEspNowCommandHook _espNowCommandHook = nullptr;
-  String _serialMenuLine;
+  ArmorLinkSerialRuntime _serialRuntime;
   friend class ArmorLinkTelemetryBuilder;
   bool _remoteTelemetryEnabled = false;
   uint32_t _telemetryMinIntervalMs = 100;
+  bool _serialRebootRequested = false;
+  uint32_t _serialRebootAtMs = 0;
+
+  struct ArmorLinkSystemConfig {
+    String nodeName;
+    bool gatewayMode = false;
+    bool bluetoothEnabled = false;
+    String bluetoothName;
+    bool wirelessEnabled = true;
+    int wirelessChannel = 1;
+  };
+
+  ArmorLinkSystemConfig _systemConfig;
+
+  void initializeSystemConfig(
+      const ArmorLinkModule& module,
+      const ArmorLinkOptions& options) {
+    _systemConfig.nodeName =
+        normalizeSystemName(
+            options.nodeName.isEmpty()
+                ? module.name()
+                : options.nodeName,
+            module.name().isEmpty() ? String("ArmorLink") : module.name());
+
+    _systemConfig.gatewayMode = options.enableGateway;
+    _systemConfig.bluetoothEnabled = options.enableBle;
+    _systemConfig.bluetoothName =
+        normalizeSystemName(options.bleName, "ArmorLink");
+    _systemConfig.wirelessEnabled = options.enableEspNow;
+    _systemConfig.wirelessChannel = options.espNowChannel;
+  }
+
+  void registerSystemConfig(ArmorLinkModule& module) {
+    if (!module.config().containsKey("nodeName")) {
+      module.config().addString("nodeName", &_systemConfig.nodeName, _systemConfig.nodeName)
+          .label("Node Name").section("ArmorLink")
+          .tooltip("Short name shown to ArmorLink setup tools and nearby nodes.")
+          .rebootRequired();
+    }
+
+    if (!module.config().containsKey("bridgeMode")) {
+      module.config().addBool("bridgeMode", &_systemConfig.gatewayMode, _systemConfig.gatewayMode)
+          .label("Gateway Mode").section("ArmorLink")
+          .tooltip("Allows this node to connect ArmorLink devices together. Use only one Gateway in an ArmorLink network.")
+          .onBoolChange([this](bool enabled) {
+            if (enabled) {
+              _systemConfig.wirelessEnabled = true;
+            }
+          })
+          .rebootRequired();
+    }
+
+    if (!module.config().containsKey("bluetoothSetup")) {
+      module.config().addBool("bluetoothSetup", &_systemConfig.bluetoothEnabled, _systemConfig.bluetoothEnabled)
+          .label("Enable Bluetooth").section("ArmorLink")
+          .tooltip("Allows phones and setup tools to discover this node over Bluetooth.")
+          .rebootRequired();
+    }
+
+    if (!module.config().containsKey("bluetoothName")) {
+      module.config().addString("bluetoothName", &_systemConfig.bluetoothName, _systemConfig.bluetoothName)
+          .label("Bluetooth Name").section("ArmorLink")
+          .tooltip("Name shown when pairing or discovering this node over Bluetooth.")
+          .visibleWhen("bluetoothSetup", true)
+          .rebootRequired();
+    }
+
+    if (!module.config().containsKey("nodeLink")) {
+      module.config().addBool("nodeLink", &_systemConfig.wirelessEnabled, _systemConfig.wirelessEnabled)
+          .label("Enable Wireless Communication").section("ArmorLink")
+          .tooltip("Enables wireless communication with other ArmorLink nodes.")
+          .rebootRequired();
+    }
+
+    if (!module.config().containsKey("nodeLinkChannel")) {
+      module.config().addInt("nodeLinkChannel", &_systemConfig.wirelessChannel, _systemConfig.wirelessChannel)
+          .label("Channel").section("ArmorLink")
+          .tooltip("Advanced: nearby ArmorLink nodes must use the same channel.")
+          .visibleWhen("nodeLink", true)
+          .advanced()
+          .rebootRequired()
+          .range(1, 13).step(1);
+    }
+  }
+
+  void applySystemConfig() {
+    if (_module == nullptr) {
+      return;
+    }
+
+    _systemConfig.nodeName =
+        normalizeSystemName(
+            _systemConfig.nodeName,
+            _module->name().isEmpty() ? String("ArmorLink") : _module->name());
+    _systemConfig.bluetoothName =
+        normalizeSystemName(_systemConfig.bluetoothName, "ArmorLink");
+
+    if (_systemConfig.gatewayMode) {
+      _systemConfig.wirelessEnabled = true;
+    }
+
+    _module->name(_systemConfig.nodeName);
+    _options.enableGateway = _systemConfig.gatewayMode;
+    _options.enableBle = _systemConfig.bluetoothEnabled;
+    _options.bleName = _systemConfig.bluetoothName;
+    _options.enableEspNow = _systemConfig.wirelessEnabled;
+    _options.espNowChannel =
+        static_cast<uint8_t>(
+            constrain(_systemConfig.wirelessChannel, 1, 13));
+  }
+
+  static String normalizeSystemName(
+      const String& value,
+      const String& fallback) {
+    String result = value;
+    result.trim();
+
+    if (result.isEmpty()) {
+      result = fallback;
+      result.trim();
+    }
+
+    return result;
+  }
 
   struct TelemetryRateEntry {
     char key[32];
     uint32_t lastSentMs;
   };
-void serialMenuTick() {
-  if (!_options.enableSerialMenu || !_isGatewayMode) {
-    return;
+
+  void serialTick() {
+    if (!_options.enableSerialCommands &&
+        !_options.enableSerialMenu) {
+        return;
+    }
+
+      _serialRuntime.loop();
   }
 
-  while (Serial.available() > 0) {
-    char c = static_cast<char>(Serial.read());
+  void rebootTick() {
+      if (!_serialRebootRequested) {
+          return;
+      }
 
-    if (c == '\r') {
-      continue;
-    }
+      if (static_cast<int32_t>(millis() - _serialRebootAtMs) < 0) {
+          return;
+      }
 
-    if (c == '\n') {
-      handleSerialMenuCommand(_serialMenuLine);
-      _serialMenuLine = "";
-      return;
-    }
-
-    if (_serialMenuLine.length() < 160) {
-      _serialMenuLine += c;
-    }
+      Serial.println("[SYSTEM] Restarting now");
+      Serial.flush();
+      ESP.restart();
   }
+
+  static bool handleFlasherSerialPayloadThunk(
+      void* context,
+      const String& payload
+  ) {
+      ArmorLinkRuntime* runtime =
+          static_cast<ArmorLinkRuntime*>(context);
+
+      return runtime
+          ? runtime->handleFlasherSerialPayload(payload)
+          : false;
+  }
+
+  static bool handleUnknownSerialLineThunk(
+      void* context,
+      const String& line
+  ) {
+      ArmorLinkRuntime* runtime =
+          static_cast<ArmorLinkRuntime*>(context);
+
+      return runtime
+          ? runtime->handleUnknownSerialLine(line)
+          : false;
+  }
+
+ bool handleFlasherSerialPayload(
+    const String& payload
+  ) {
+      if (payload.isEmpty()) {
+          sendSerialFlasherError(
+              0,
+              "empty_payload",
+              "Flasher payload is empty"
+          );
+          return true;
+      }
+
+      StaticJsonDocument<512> doc;
+
+      const DeserializationError error =
+          deserializeJson(doc, payload);
+
+      if (error) {
+          sendSerialFlasherError(
+              0,
+              "invalid_json",
+              error.c_str()
+          );
+          return true;
+      }
+
+      const String type =
+          String((const char*)(doc["type"] | ""));
+
+      const uint16_t requestId =
+          doc["requestId"] | 0;
+
+      if (type.equalsIgnoreCase("config_get")) {
+          return handleSerialConfigGet(
+              doc,
+              requestId
+          );
+      }
+      if (type.equalsIgnoreCase("config_set")) {
+          return handleSerialConfigSet(
+              doc,
+              requestId
+          );
+      }
+      if (type.equalsIgnoreCase("profile_set")) {
+          return handleSerialProfileSet(
+              doc,
+              requestId
+          );
+      }
+      if (type.equalsIgnoreCase("action_execute")) {
+          return handleSerialActionExecute(
+              doc,
+              requestId
+          );
+      }
+      if (type.equalsIgnoreCase("servo_move")) {
+          return handleSerialServoMove(
+              doc,
+              requestId
+          );
+      }
+      if (type.equalsIgnoreCase("reboot")) {
+          return handleSerialReboot(
+              doc,
+              requestId
+          );
+      }
+      sendSerialFlasherError(
+          requestId,
+          "unsupported_type",
+          type.isEmpty()
+              ? "Missing message type"
+              : String("Unsupported message type: ") + type
+      );
+
+      return true;
+  }
+ArmorLinkActionDef* findAction(
+    const String& entity,
+    const String& command
+) {
+    if (_module == nullptr) {
+        return nullptr;
+    }
+
+    for (auto& action : _module->actions().items()) {
+        if (action.entity.equalsIgnoreCase(entity) &&
+            action.command.equalsIgnoreCase(command)) {
+            return &action;
+        }
+    }
+
+    return nullptr;
 }
+ArmorLinkConfigFieldDef* findConfigField(
+    const String& entity,
+    const String& command
+) {
+    if (_module == nullptr) {
+        return nullptr;
+    }
+
+    for (auto& field : _module->config().items()) {
+        if (field.entity == entity &&
+            field.command == command) {
+            return &field;
+        }
+    }
+
+    return nullptr;
+}
+
+bool readConfigFieldValue(
+    const ArmorLinkConfigFieldDef& field,
+    int32_t& value
+) {
+    switch (field.kind) {
+        case ArmorLinkFieldKind::Int:
+            if (field.intBinding.ptr == nullptr) {
+                return false;
+            }
+
+            value = static_cast<int32_t>(
+                *field.intBinding.ptr
+            );
+
+            return true;
+
+        case ArmorLinkFieldKind::Bool:
+            if (field.boolBinding.ptr == nullptr) {
+                return false;
+            }
+
+            value = *field.boolBinding.ptr ? 1 : 0;
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+bool readConfigFieldValue(
+    const ArmorLinkConfigFieldDef& field,
+    String& value
+) {
+    if (field.kind != ArmorLinkFieldKind::String ||
+        field.stringBinding.ptr == nullptr) {
+        return false;
+    }
+
+    value = *field.stringBinding.ptr;
+    return true;
+}
+void sendSerialActionAck(
+    uint16_t requestId,
+    const ArmorLinkActionDef& action
+) {
+    StaticJsonDocument<384> doc;
+
+    doc["type"] = "ack";
+    doc["requestId"] = requestId;
+    doc["status"] = "ok";
+    doc["operation"] = "action_execute";
+
+    doc["actionId"] = action.id;
+    doc["entity"] = action.entity;
+    doc["command"] = action.command;
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+}
+
+void sendSerialConfigSetAck(
+    uint16_t requestId,
+    const String& entity,
+    const String& command,
+    const String& requestedValue,
+    const String& previousValue,
+    const String& appliedValue
+) {
+    StaticJsonDocument<512> doc;
+
+    doc["type"] = "ack";
+    doc["requestId"] = requestId;
+    doc["status"] = "ok";
+    doc["operation"] = "config_set";
+
+    doc["entity"] = entity;
+    doc["command"] = command;
+    doc["requestedValue"] = requestedValue;
+    doc["previousValue"] = previousValue;
+    doc["appliedValue"] = appliedValue;
+    doc["clamped"] = false;
+    doc["changed"] = previousValue != appliedValue;
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+}
+void sendSerialConfigSetAck(
+    uint16_t requestId,
+    const String& entity,
+    const String& command,
+    int32_t requestedValue,
+    int32_t previousValue,
+    int32_t appliedValue,
+    ArmorLinkFieldKind fieldKind
+) {
+    StaticJsonDocument<512> doc;
+
+    doc["type"] = "ack";
+    doc["requestId"] = requestId;
+    doc["status"] = "ok";
+    doc["operation"] = "config_set";
+
+    doc["entity"] = entity;
+    doc["command"] = command;
+
+    if (fieldKind == ArmorLinkFieldKind::Bool) {
+        const bool requestedBool =
+            requestedValue != 0;
+
+        const bool previousBool =
+            previousValue != 0;
+
+        const bool appliedBool =
+            appliedValue != 0;
+
+        doc["requestedValue"] = requestedBool;
+        doc["previousValue"] = previousBool;
+        doc["appliedValue"] = appliedBool;
+
+        doc["clamped"] =
+            requestedBool != appliedBool;
+
+        doc["changed"] =
+            previousBool != appliedBool;
+    } else {
+        doc["requestedValue"] = requestedValue;
+        doc["previousValue"] = previousValue;
+        doc["appliedValue"] = appliedValue;
+
+        doc["clamped"] =
+            requestedValue != appliedValue;
+
+        doc["changed"] =
+            previousValue != appliedValue;
+    }
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+}
+
+void sendSerialServoMoveAck(
+    uint16_t requestId,
+    const String& servoId,
+    int requestedPosition,
+    int appliedPosition,
+    int pin
+) {
+    StaticJsonDocument<384> doc;
+
+    doc["type"] = "ack";
+    doc["requestId"] = requestId;
+    doc["status"] = "ok";
+    doc["operation"] = "servo_move";
+    doc["servo"] = servoId;
+    doc["requestedPosition"] = requestedPosition;
+    doc["appliedPosition"] = appliedPosition;
+    doc["clamped"] = requestedPosition != appliedPosition;
+    doc["pin"] = pin;
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+}
+
+bool handleSerialActionExecute(
+    JsonDocument& doc,
+    uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+
+        return true;
+    }
+
+    const String requestedTarget =
+        String((const char*)(doc["target"] | ""));
+
+    if (!requestedTarget.isEmpty() &&
+        !requestedTarget.equalsIgnoreCase("*") &&
+        !requestedTarget.equalsIgnoreCase(
+            _module->name()
+        )) {
+
+        sendSerialFlasherError(
+            requestId,
+            "target_mismatch",
+            String("Connected module is ") +
+                _module->name()
+        );
+
+        return true;
+    }
+
+    const String entity =
+        String((const char*)(doc["entity"] | ""));
+
+    const String command =
+        String((const char*)(doc["command"] | ""));
+
+    if (entity.isEmpty()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_entity",
+            "Action entity is missing"
+        );
+
+        return true;
+    }
+
+    if (command.isEmpty()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_command",
+            "Action command is missing"
+        );
+
+        return true;
+    }
+
+    ArmorLinkActionDef* action =
+        findAction(
+            entity,
+            command
+        );
+
+    if (action == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_found",
+            String("Action not found: ") +
+                entity +
+                "/" +
+                command
+        );
+
+        return true;
+    }
+
+    if (!action->enabled) {
+        sendSerialFlasherError(
+            requestId,
+            "action_disabled",
+            String("Action is disabled: ") +
+                action->id
+        );
+
+        return true;
+    }
+
+    if (!action->callback) {
+        sendSerialFlasherError(
+            requestId,
+            "handler_unavailable",
+            String("Action has no handler: ") +
+                action->id
+        );
+
+        return true;
+    }
+
+    const ArmorLinkDispatchResult actionResult =
+        _dispatch.handleAction(
+            action->entity,
+            action->command
+        );
+
+    if (actionResult !=
+        ArmorLinkDispatchResult::Ok) {
+
+        sendSerialFlasherError(
+            requestId,
+            ArmorLinkDispatch::toString(
+                actionResult
+            ),
+            String("Action execution failed: ") +
+                action->id
+        );
+
+        return true;
+    }
+
+    sendSerialActionAck(
+        requestId,
+        *action
+    );
+
+    return true;
+}
+
+bool handleSerialServoMove(
+    JsonDocument& doc,
+    uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+
+        return true;
+    }
+
+    const String requestedTarget =
+        String((const char*)(doc["target"] | ""));
+
+    if (!requestedTarget.isEmpty() &&
+        !requestedTarget.equalsIgnoreCase("*") &&
+        !requestedTarget.equalsIgnoreCase(
+            _module->name()
+        )) {
+
+        sendSerialFlasherError(
+            requestId,
+            "target_mismatch",
+            String("Connected module is ") +
+                _module->name()
+        );
+
+        return true;
+    }
+
+    const String servoId =
+        String((const char*)(doc["servo"] | ""));
+
+    if (servoId.isEmpty()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_servo",
+            "Servo id is missing"
+        );
+
+        return true;
+    }
+
+    if (!doc["position"].is<int>()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_position",
+            "Servo position is missing or invalid"
+        );
+
+        return true;
+    }
+
+    ArmorLinkServoConfig* servo =
+        _module->config().findServoConfig(servoId);
+
+    if (servo == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "servo_not_found",
+            String("Servo config not found: ") +
+                servoId
+        );
+
+        return true;
+    }
+
+    if (servo->pin < 0 || servo->pin > 48) {
+        sendSerialFlasherError(
+            requestId,
+            "invalid_gpio",
+            String("Servo GPIO is not configured: ") +
+                servoId
+        );
+
+        return true;
+    }
+
+    const int requestedPosition =
+        doc["position"].as<int>();
+
+    const int appliedPosition =
+        constrain(
+            requestedPosition,
+            0,
+            180
+        );
+
+#if ARMORLINK_HAS_ESP32_SERVO
+    if (_serialServoPin >= 0) {
+        _serialServo.detach();
+    }
+
+    _serialServo.setPeriodHertz(50);
+    _serialServo.attach(
+        servo->pin,
+        servo->minPulseUs,
+        servo->maxPulseUs
+    );
+
+    _serialServoPin = servo->pin;
+    _serialServo.write(appliedPosition);
+
+    sendSerialServoMoveAck(
+        requestId,
+        servoId,
+        requestedPosition,
+        appliedPosition,
+        servo->pin
+    );
+#else
+    sendSerialFlasherError(
+        requestId,
+        "servo_unavailable",
+        "ESP32Servo is not available in this build"
+    );
+#endif
+
+    return true;
+}
+
+bool handleSerialReboot(
+    JsonDocument& doc,
+    uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+        return true;
+    }
+
+    const String requestedTarget =
+        String((const char*)(doc["target"] | ""));
+
+    if (!requestedTarget.isEmpty() &&
+        !requestedTarget.equalsIgnoreCase("*") &&
+        !requestedTarget.equalsIgnoreCase(
+            _module->name()
+        )) {
+
+        sendSerialFlasherError(
+            requestId,
+            "target_mismatch",
+            String("Connected module is ") +
+                _module->name()
+        );
+
+        return true;
+    }
+
+    sendSerialFlasherAck(
+        requestId,
+        "ok",
+        "Rebooting device"
+    );
+
+    Serial.flush();
+
+    _serialRebootRequested = true;
+    _serialRebootAtMs = millis() + 250;
+
+    return true;
+}
+
+bool handleSerialConfigSet(
+    JsonDocument& doc,
+    uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+
+        return true;
+    }
+
+    const String requestedTarget =
+        String((const char*)(doc["target"] | ""));
+
+    if (!requestedTarget.isEmpty() &&
+        !requestedTarget.equalsIgnoreCase("*") &&
+        !requestedTarget.equalsIgnoreCase(
+            _module->name()
+        )) {
+
+        sendSerialFlasherError(
+            requestId,
+            "target_mismatch",
+            String("Connected module is ") +
+                _module->name()
+        );
+
+        return true;
+    }
+
+    const String entity =
+        String((const char*)(doc["entity"] | "config"));
+
+    const String command =
+        String((const char*)(doc["command"] | ""));
+
+    if (command.isEmpty()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_command",
+            "Config command is missing"
+        );
+
+        return true;
+    }
+
+    if (!doc.containsKey("value")) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_value",
+            "Config value is missing"
+        );
+
+        return true;
+    }
+
+    ArmorLinkConfigFieldDef* field =
+        findConfigField(
+            entity,
+            command
+        );
+
+    if (field == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_found",
+            String("Config field not found: ") +
+                entity +
+                "/" +
+                command
+        );
+
+        return true;
+    }
+
+    if (!field->editable) {
+        sendSerialFlasherError(
+            requestId,
+            "not_editable",
+            String("Config field is read-only: ") +
+                command
+        );
+
+        return true;
+    }
+
+    if (field->kind == ArmorLinkFieldKind::String) {
+        if (!doc["value"].is<const char*>()) {
+            sendSerialFlasherError(
+                requestId,
+                "invalid_value_type",
+                String("String config field requires ") +
+                    "a string value: " +
+                    command
+            );
+
+            return true;
+        }
+
+        String previousValue;
+
+        if (!readConfigFieldValue(
+                *field,
+                previousValue
+            )) {
+
+            sendSerialFlasherError(
+                requestId,
+                "binding_unavailable",
+                String("Config binding is unavailable: ") +
+                    command
+            );
+
+            return true;
+        }
+
+        String requestedValue =
+            String((const char*)(doc["value"] | ""));
+
+        requestedValue.trim();
+
+        const ArmorLinkDispatchResult configResult =
+            _dispatch.handleConfigSet(
+                entity,
+                command,
+                requestedValue
+            );
+
+        if (configResult !=
+            ArmorLinkDispatchResult::Ok) {
+
+            sendSerialFlasherError(
+                requestId,
+                ArmorLinkDispatch::toString(
+                    configResult
+                ),
+                "Config update failed"
+            );
+
+            return true;
+        }
+
+        String appliedValue;
+
+        if (!readConfigFieldValue(
+                *field,
+                appliedValue
+            )) {
+
+            sendSerialFlasherError(
+                requestId,
+                "binding_unavailable",
+                String(
+                    "Config was updated, but the applied "
+                    "value could not be read: "
+                ) + command
+            );
+
+            return true;
+        }
+
+        sendSerialConfigSetAck(
+            requestId,
+            entity,
+            command,
+            requestedValue,
+            previousValue,
+            appliedValue
+        );
+
+        return true;
+    }
+
+    int32_t requestedValue = 0;
+
+    switch (field->kind) {
+        case ArmorLinkFieldKind::Bool:
+            if (doc["value"].is<bool>()) {
+                requestedValue =
+                    doc["value"].as<bool>()
+                        ? 1
+                        : 0;
+            } else if (
+                doc["value"].is<int>() ||
+                doc["value"].is<long>() ||
+                doc["value"].is<unsigned int>() ||
+                doc["value"].is<unsigned long>()
+            ) {
+                requestedValue =
+                    doc["value"].as<int32_t>();
+            } else {
+                sendSerialFlasherError(
+                    requestId,
+                    "invalid_value_type",
+                    String("Boolean config field requires ") +
+                        "a boolean or integer value: " +
+                        command
+                );
+
+                return true;
+            }
+
+            break;
+
+        case ArmorLinkFieldKind::Int:
+            if (
+                doc["value"].is<int>() ||
+                doc["value"].is<long>() ||
+                doc["value"].is<unsigned int>() ||
+                doc["value"].is<unsigned long>()
+            ) {
+                requestedValue =
+                    doc["value"].as<int32_t>();
+            } else {
+                sendSerialFlasherError(
+                    requestId,
+                    "invalid_value_type",
+                    String("Integer config field requires ") +
+                        "an integer value: " +
+                        command
+                );
+
+                return true;
+            }
+
+            break;
+
+        case ArmorLinkFieldKind::Float:
+            sendSerialFlasherError(
+                requestId,
+                "unsupported_field_type",
+                String("Float config_set is not yet supported: ") +
+                    command
+            );
+
+            return true;
+
+        case ArmorLinkFieldKind::Readonly:
+        default:
+            sendSerialFlasherError(
+                requestId,
+                "not_editable",
+                String("Config field is read-only: ") +
+                    command
+            );
+
+            return true;
+    }
+
+    int32_t previousValue = 0;
+
+    if (!readConfigFieldValue(
+            *field,
+            previousValue
+        )) {
+
+        sendSerialFlasherError(
+            requestId,
+            "binding_unavailable",
+            String("Config binding is unavailable: ") +
+                command
+        );
+
+        return true;
+    }
+
+    const ArmorLinkDispatchResult configResult =
+        _dispatch.handleConfigSet(
+            entity,
+            command,
+            requestedValue
+        );
+
+    if (configResult !=
+        ArmorLinkDispatchResult::Ok) {
+
+        sendSerialFlasherError(
+            requestId,
+            ArmorLinkDispatch::toString(
+                configResult
+            ),
+            "Config update failed"
+        );
+
+        return true;
+    }
+
+    int32_t appliedValue = 0;
+
+    if (!readConfigFieldValue(
+            *field,
+            appliedValue
+        )) {
+
+        sendSerialFlasherError(
+            requestId,
+            "binding_unavailable",
+            String(
+                "Config was updated, but the applied "
+                "value could not be read: "
+            ) + command
+        );
+
+        return true;
+    }
+
+    sendSerialConfigSetAck(
+        requestId,
+        entity,
+        command,
+        requestedValue,
+        previousValue,
+        appliedValue,
+        field->kind
+    );
+
+    return true;
+}
+
+bool handleSerialProfileSet(
+    JsonDocument& doc,
+    uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+
+        return true;
+    }
+
+    if (!doc["name"].is<const char*>()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_name",
+            "Profile name is missing"
+        );
+
+        return true;
+    }
+
+    String requestedName =
+        String((const char*)(doc["name"] | ""));
+
+    requestedName.trim();
+
+    if (requestedName.isEmpty()) {
+        sendSerialFlasherError(
+            requestId,
+            "invalid_name",
+            "Profile name cannot be empty"
+        );
+
+        return true;
+    }
+
+    if (requestedName.length() > 64) {
+        sendSerialFlasherError(
+            requestId,
+            "invalid_name",
+            "Profile name is too long"
+        );
+
+        return true;
+    }
+
+    const String previousName =
+        _module->profileName();
+
+    _module->activeProfileName(requestedName);
+
+    if (!_storage.saveProfileName(requestedName)) {
+        _module->profileName(previousName);
+
+        sendSerialFlasherError(
+            requestId,
+            "storage_error",
+            "Profile name could not be saved"
+        );
+
+        return true;
+    }
+
+    StaticJsonDocument<384> outDoc;
+
+    outDoc["type"] = "ack";
+    outDoc["requestId"] = requestId;
+    outDoc["status"] = "ok";
+    outDoc["operation"] = "profile_set";
+    outDoc["previousName"] = previousName;
+    outDoc["profileName"] = requestedName;
+    outDoc["changed"] = previousName != requestedName;
+
+    String json;
+    serializeJson(outDoc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+
+    return true;
+}
+
+void sendSerialFlasherAck(
+    uint16_t requestId,
+    const String& status,
+    const String& message
+) {
+    StaticJsonDocument<384> doc;
+
+    doc["type"] = "ack";
+    doc["requestId"] = requestId;
+    doc["status"] = status;
+    doc["message"] = message;
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+}
+
+bool handleSerialConfigGet(
+    JsonDocument& doc,
+    uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+        return true;
+    }
+
+    const String requestedTarget =
+        String((const char*)(doc["target"] | ""));
+
+    if (!requestedTarget.isEmpty() &&
+        !requestedTarget.equalsIgnoreCase("*") &&
+        !requestedTarget.equalsIgnoreCase(
+            _module->name()
+        )) {
+
+        sendSerialFlasherError(
+            requestId,
+            "target_mismatch",
+            String("Connected module is ") +
+                _module->name()
+        );
+
+        return true;
+    }
+
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "descriptor_empty",
+            "Config descriptor is empty"
+        );
+        return true;
+    }
+
+    sendSerialConfigDescriptor(
+        requestId,
+        *_module
+    );
+
+    return true;
+}
+
+class ArmorLinkSerialDescriptorPrint : public Print {
+public:
+    ArmorLinkSerialDescriptorPrint(Print& out, size_t chunkSize)
+        : _out(out),
+          _chunkSize(chunkSize) {
+        _buffer.reserve(chunkSize);
+    }
+
+    size_t write(uint8_t value) override {
+        _buffer += static_cast<char>(value);
+
+        if (_buffer.length() >= _chunkSize) {
+            flushChunk();
+        }
+
+        return 1;
+    }
+
+    size_t write(const uint8_t* buffer, size_t size) override {
+        size_t written = 0;
+
+        for (size_t i = 0; i < size; ++i) {
+            written += write(buffer[i]);
+        }
+
+        return written;
+    }
+
+    void flushChunk() {
+        if (_buffer.isEmpty()) {
+            return;
+        }
+
+        _out.println(_buffer);
+        _buffer = "";
+    }
+
+private:
+    Print& _out;
+    size_t _chunkSize;
+    String _buffer;
+};
+
+void sendSerialConfigDescriptor(
+    uint16_t requestId,
+    const ArmorLinkModule& module
+) {
+    constexpr size_t chunkSize = 192;
+    size_t descriptorLength = 0;
+
+    ArmorLinkSerialDescriptorPrint chunkedSerial(Serial, chunkSize);
+
+    if (!ArmorLinkDescriptor::measure(module, descriptorLength)) {
+        sendSerialFlasherError(
+            requestId,
+            "descriptor_build_failed",
+            "Config descriptor could not be serialized"
+        );
+        return;
+    }
+
+    Serial.print("@ALF:CONFIG_BEGIN ");
+    Serial.print(requestId);
+    Serial.print(' ');
+    Serial.println(descriptorLength);
+
+    if (!ArmorLinkDescriptor::write(module, chunkedSerial)) {
+        chunkedSerial.flushChunk();
+        Serial.print("@ALF:CONFIG_END ");
+        Serial.println(requestId);
+        return;
+    }
+
+    chunkedSerial.flushChunk();
+
+    Serial.print("@ALF:CONFIG_END ");
+    Serial.println(requestId);
+}
+
+void sendSerialFlasherError(
+    uint16_t requestId,
+    const String& code,
+    const String& message
+) {
+    StaticJsonDocument<384> doc;
+
+    doc["type"] = "error";
+    doc["requestId"] = requestId;
+    doc["code"] = code;
+    doc["message"] = message;
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+}
+
+  bool handleUnknownSerialLine(
+      const String& line
+  ) {
+      if (_options.enableSerialMenu &&
+          _isGatewayMode) {
+          handleSerialMenuCommand(line);
+          return true;
+      }
+
+      return false;
+  }
 
   void updateStoredModuleMetadataByMac(
     const String& macText,
@@ -3393,6 +4755,9 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         }
 
         String json = buildDescriptor();
+        Serial.printf("[CONFIG] descriptor length=%u for requestId=%u\n",
+                      static_cast<unsigned>(json.length()),
+                      msg.requestId);
 
         esp_err_t result = _transport.sendConfigJsonChunkedToTarget(
           String(msg.source),

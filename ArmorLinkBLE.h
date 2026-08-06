@@ -246,18 +246,18 @@ void processPendingConfigTransfer() {
         _clientConnected ? "YES" : "NO"
 
     );
-    const uint16_t totalLen = (uint16_t)json.length();
-    const uint16_t chunkSize = 120;
-    const uint16_t chunkCount =
+    const size_t totalLen = json.length();
+    const size_t chunkSize = 120;
+    const size_t chunkCount =
         (totalLen == 0)
             ? 1
-            : (uint16_t)((totalLen + chunkSize - 1) / chunkSize);
+            : ((totalLen + chunkSize - 1) / chunkSize);
 
     Serial.println("========== CONFIG TRANSFER ==========");
     Serial.printf("Request ID  : %u\n", requestId);
-    Serial.printf("Total length: %u bytes\n", totalLen);
-    Serial.printf("Chunk size  : %u bytes\n", chunkSize);
-    Serial.printf("Chunk count : %u\n", chunkCount);
+    Serial.printf("Total length: %u bytes\n", static_cast<unsigned>(totalLen));
+    Serial.printf("Chunk size  : %u bytes\n", static_cast<unsigned>(chunkSize));
+    Serial.printf("Chunk count : %u\n", static_cast<unsigned>(chunkCount));
 
     const uint16_t metaDelayMs = 40;
     const uint16_t chunkDelayMs = 25;
@@ -283,10 +283,9 @@ void processPendingConfigTransfer() {
         yield();
     }
 
-    for (uint16_t i = 0; i < chunkCount; i++) {
-        const uint16_t start = i * chunkSize;
-        const uint16_t len =
-            min((uint16_t)chunkSize, (uint16_t)(totalLen - start));
+    for (size_t i = 0; i < chunkCount; i++) {
+        const size_t start = i * chunkSize;
+        const size_t len = min(chunkSize, totalLen - start);
 
         StaticJsonDocument<340> doc;
         doc["type"] = "config_chunk";
@@ -303,11 +302,11 @@ void processPendingConfigTransfer() {
 
         Serial.printf(
             "[CONFIG TX] Chunk %u/%u | start=%u | data=%u | packet=%u\n",
-            i + 1,
-            chunkCount,
-            start,
-            len,
-            out.length()
+            static_cast<unsigned>(i + 1),
+            static_cast<unsigned>(chunkCount),
+            static_cast<unsigned>(start),
+            static_cast<unsigned>(len),
+            static_cast<unsigned>(out.length())
         );
 
         notifyEventJson(out);
