@@ -6,6 +6,7 @@
   #include <ESP8266WiFi.h>
   extern "C" {
     #include <espnow.h>
+    #include <user_interface.h>
   }
 #elif defined(ESP32)
   #include <WiFi.h>
@@ -68,6 +69,7 @@ public:
     AL_VERBOSELN("?? Initialisiere ESP-NOW im Raw Mode");
 #if defined(ESP8266)
     WiFi.mode(WIFI_AP);
+    wifi_set_channel(channel);
     if (esp_now_init() != 0) return false;
     esp_now_set_self_role(ESP_NOW_ROLE_SLAVE);
     if (onReceive) esp_now_register_recv_cb(onReceive);

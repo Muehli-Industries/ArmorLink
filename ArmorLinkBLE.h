@@ -247,7 +247,7 @@ void processPendingConfigTransfer() {
 
     );
     const size_t totalLen = json.length();
-    const size_t chunkSize = 120;
+    const size_t chunkSize = 80;
     const size_t chunkCount =
         (totalLen == 0)
             ? 1
@@ -259,9 +259,9 @@ void processPendingConfigTransfer() {
     Serial.printf("Chunk size  : %u bytes\n", static_cast<unsigned>(chunkSize));
     Serial.printf("Chunk count : %u\n", static_cast<unsigned>(chunkCount));
 
-    const uint16_t metaDelayMs = 40;
-    const uint16_t chunkDelayMs = 25;
-    const uint16_t endDelayMs = 60;
+    const uint16_t metaDelayMs = 80;
+    const uint16_t chunkDelayMs = 50;
+    const uint16_t endDelayMs = 120;
 
     {
         StaticJsonDocument<256> doc;

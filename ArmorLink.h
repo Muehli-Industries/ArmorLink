@@ -470,6 +470,7 @@ void onBleDisconnected() {
     const bool ok = sendPairAnnounce();
     if (ok) {
       _lastPairAnnounceMs = millis();
+      emitPairingStateEvent("pairing_ping");
     }
 
     return ok;
@@ -562,6 +563,7 @@ void onBleDisconnected() {
     updateModulePresenceByMac(_pendingCandidates[index].mac);
 
     emitPairingCompletedEvent(_pendingCandidates[index]);
+    emitModulePresenceSnapshot();
     _pendingCandidates[index].occupied = false;
     rebuildPendingCandidateCount();
     return true;
@@ -745,6 +747,17 @@ void onBleDisconnected() {
     if (!_transport.decodeIncomingPacket(data, len, incoming)) {
       logWarn("espnow", "decode", String("Invalid packet length/version: ") + len);
       return;
+    }
+
+    if (_isGatewayMode) {
+      Serial.printf("[ESPNOW][GW][RX] len=%d type=%u source=%s target=%s entity=%s command=%s payloadLen=%u\n",
+                    len,
+                    incoming.msgType,
+                    incoming.source,
+                    incoming.target,
+                    incoming.entity,
+                    incoming.command,
+                    incoming.payloadLen);
     }
 
     if (!_transport.enqueueReceivedPacket(incoming)) {
@@ -970,6 +983,15 @@ void onBleDisconnected() {
         "ok",
         String("Log stream ") + (enabled ? "enabled" : "disabled"));
 
+      return true;
+    }
+
+    if (packet.msgType == AL_MSG_COMMAND &&
+        equalsIgnoreCase(packet.entity, "presence") &&
+        equalsIgnoreCase(packet.command, "snapshot")) {
+
+      emitModulePresenceSnapshot();
+      notifyAck(packet.requestId, "ok", "Presence snapshot sent");
       return true;
     }
 
@@ -3085,8 +3107,6 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
   module["name"] = _module->name();
   module["type"] = moduleTypeToString(_module->type());
   module["mac"] = localMacString();
-  module["moduleVersion"] = _module->version();
-  module["armorLinkVersion"] = ARMORLINK_VERSION;
 
   String eventJson;
   serializeJson(eventDoc, eventJson);
@@ -3103,11 +3123,43 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
   const uint8_t broadcastMac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
   esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);
 
-  Serial.printf("[PAIR] Pairing required reported to gateway | source=%s | result=%s | payload=%s\n",
+  Serial.printf("[PAIR] Pairing required reported to gateway | source=%s | result=%s | payloadLen=%u | payload=%s\n",
                 msg.source,
                 esp_err_to_name(result),
+                static_cast<unsigned>(eventJson.length()),
                 eventJson.c_str());
-}  
+}
+  void emitCompactPairingRequiredEvent(const String& payload, const char* fallbackName) {
+    StaticJsonDocument<256> inDoc;
+    const bool hasPayload = payload.length() > 0 &&
+      deserializeJson(inDoc, payload) == DeserializationError::Ok;
+
+    const char* safeFallbackName = fallbackName != nullptr && strlen(fallbackName) > 0
+      ? fallbackName
+      : "Unknown";
+    const char* moduleName = hasPayload
+      ? (inDoc["module"]["name"] | safeFallbackName)
+      : safeFallbackName;
+    const char* moduleType = hasPayload
+      ? (inDoc["module"]["type"] | "Unknown")
+      : "Unknown";
+    const char* moduleMac = hasPayload
+      ? (inDoc["module"]["mac"] | "")
+      : "";
+
+    StaticJsonDocument<192> outDoc;
+    outDoc["type"] = "module_pairing_required";
+    JsonObject module = outDoc.createNestedObject("module");
+    module["name"] = moduleName;
+    module["type"] = moduleType;
+    module["mac"] = moduleMac;
+
+    String out;
+    serializeJson(outDoc, out);
+    Serial.printf("[PAIR][GW] BLE pairing required compact event: %s\n", out.c_str());
+    bleNotifyEventJson(out);
+  }
+
   bool handleInternalEspNowCommand(const ArmorLinkPacket& msg) {
 
     Serial.printf(
@@ -3151,13 +3203,9 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
 
       const String payload = armorLinkPacketPayloadToString(msg);
 
-      Serial.printf("[PAIR][GW] Module pairing required event from %s: %s\n",
-                    msg.source,
-                    payload.c_str());
+      Serial.printf("[PAIR][GW] Module pairing required event from %s\n", msg.source);
 
-      if (payload.length() > 0) {
-        bleNotifyEventJson(payload);
-      }
+      emitCompactPairingRequiredEvent(payload, msg.source);
 
       return true;
     }
@@ -3731,6 +3779,8 @@ void emitModulePresenceSnapshot() {
   }
   Serial.printf("[PRESENCE] Snapshot start. pairedModuleCount=%u\n",
                   (unsigned)_pairedModuleCount);
+  emitModulePresenceSnapshotEvent();
+
   const uint32_t now = millis();
   const uint32_t timeoutMs = _options.moduleTimeoutMs;
 
@@ -3761,6 +3811,31 @@ void emitModulePresenceSnapshot() {
     emitModulePresenceEvent(_pairedModules[i], online, silentMs);
   }
 }
+
+  void emitModulePresenceSnapshotEvent() {
+    if (!_isGatewayMode) {
+      return;
+    }
+
+    StaticJsonDocument<3072> doc;
+    doc["type"] = "module_presence_snapshot";
+    doc["pairedModuleCount"] = static_cast<uint32_t>(_pairedModuleCount);
+
+    JsonArray modules = doc.createNestedArray("modules");
+    for (size_t i = 0; i < _pairedModuleCount && i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
+      JsonObject mod = modules.createNestedObject();
+      mod["name"] = _pairedModules[i].name;
+      mod["type"] = _pairedModules[i].type;
+      mod["mac"] = _pairedModules[i].mac;
+      mod["moduleVersion"] = strlen(_pairedModules[i].moduleVersion) > 0 ? _pairedModules[i].moduleVersion : "1.0";
+      mod["armorLinkVersion"] = _pairedModules[i].armorLinkVersion;
+    }
+
+    String out;
+    serializeJson(doc, out);
+    AL_VERBOSE("[PRESENCE] BLE SNAPSHOT EVENT: %s\n", out.c_str());
+    bleNotifyEventJson(out);
+  }
 
   void emitModulePresenceEvent(const ArmorLinkStoredPairedModule& module, bool isOnline, uint32_t silentMs) {
     if (!_isGatewayMode) {
@@ -3817,6 +3892,7 @@ void emitModulePresenceSnapshot() {
       if (sendPairAnnounce()) {
         Serial.printf("[PAIR][GW] Announcing pairing session %u\n", _pairingSessionId);
         _lastPairAnnounceMs = now;
+        emitPairingStateEvent("pairing_ping");
       }
     }
   }
