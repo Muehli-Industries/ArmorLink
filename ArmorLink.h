@@ -556,7 +556,17 @@ void onBleDisconnected() {
                   _pendingCandidates[index].name,
                   _pendingCandidates[index].type,
                   _pendingCandidates[index].mac);
-    esp_err_t sendResult = _transport.sendPacketToMac(moduleMac, out);
+    esp_err_t sendResult = ESP_FAIL;
+    for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+      sendResult = _transport.sendPacketToMac(moduleMac, out);
+      if (sendResult == ESP_OK) {
+        delay(35);
+        yield();
+      } else {
+        delay(20);
+        yield();
+      }
+    }
 
     Serial.print("[PAIR][GW] Pair accept send result: ");
     AL_VERBOSE(esp_err_to_name(sendResult));
@@ -3934,6 +3944,7 @@ void emitModulePresenceSnapshot() {
         Serial.printf("[PAIR][GW] Announcing pairing session %u\n", _pairingSessionId);
         _lastPairAnnounceMs = now;
         emitPairingStateEvent("pairing_ping");
+        emitPendingPairingCandidateEvents();
       }
     }
   }
@@ -4615,12 +4626,32 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
     module["name"] = candidate.name;
     module["type"] = candidate.type;
     module["mac"] = candidate.mac;
+    module["moduleVersion"] = strlen(candidate.moduleVersion) > 0 ? candidate.moduleVersion : "1.0";
+    module["armorLinkVersion"] = candidate.armorLinkVersion;
     if (_options.enableSerialMenu) {
       printPairingCandidates();
     }
     String out;
     serializeJson(doc, out);
+    Serial.printf("[PAIR][GW] BLE pairing_candidate event: %s\n", out.c_str());
     bleNotifyEventJson(out);
+  }
+
+  void emitPendingPairingCandidateEvents() {
+    if (!_isGatewayMode || !_pairingActive) {
+      return;
+    }
+
+    for (size_t i = 0; i < MAX_PENDING_PAIRING_CANDIDATES; ++i) {
+      if (!_pendingCandidates[i].occupied ||
+          _pendingCandidates[i].sessionId != _pairingSessionId) {
+        continue;
+      }
+
+      emitPairingCandidateEvent(_pendingCandidates[i]);
+      delay(20);
+      yield();
+    }
   }
 
   void emitPairingCompletedEvent(const ArmorLinkPairingCandidate& candidate) {
@@ -4696,6 +4727,20 @@ int findPairedModuleIndexByName(const char* name) const {
   return -1;
 }
 
+bool isPendingPairingCandidateName(const char* name) const {
+  if (name == nullptr || strlen(name) == 0) return false;
+
+  for (size_t i = 0; i < MAX_PENDING_PAIRING_CANDIDATES; ++i) {
+    if (_pendingCandidates[i].occupied &&
+        _pendingCandidates[i].sessionId == _pairingSessionId &&
+        equalsIgnoreCase(_pendingCandidates[i].name, name)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 bool isGatewayPacketAllowedFromUnknownSource(const ArmorLinkPacket& msg) const {
   if (!_isGatewayMode) return true;
   if (strlen(msg.source) == 0) return true;
@@ -4705,6 +4750,10 @@ bool isGatewayPacketAllowedFromUnknownSource(const ArmorLinkPacket& msg) const {
   }
 
   if (findPairedModuleIndexByName(msg.source) >= 0) {
+    return true;
+  }
+
+  if (_pairingActive && isPendingPairingCandidateName(msg.source)) {
     return true;
   }
 

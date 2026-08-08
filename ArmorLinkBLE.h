@@ -420,6 +420,16 @@ private:
 
     armorLinkPacketFromJsonDocument(doc, _commandHandler->packet);
     _commandHandler->rawJson = json;
+    Serial.printf(
+      "[BLE][RX] type=%u requestId=%u source=%s target=%s entity=%s command=%s payloadLen=%u rawLen=%u\n",
+      _commandHandler->packet.msgType,
+      _commandHandler->packet.requestId,
+      _commandHandler->packet.source,
+      _commandHandler->packet.target,
+      _commandHandler->packet.entity,
+      _commandHandler->packet.command,
+      _commandHandler->packet.payloadLen,
+      static_cast<unsigned>(json.length()));
     _commandHandler->handleCommand();
   }
 
