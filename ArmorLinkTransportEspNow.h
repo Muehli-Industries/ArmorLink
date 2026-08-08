@@ -54,9 +54,9 @@ private:
 
 class ArmorLinkTransportEspNow {
 public:
-  static constexpr size_t DEFAULT_QUEUE_SIZE = 20;
+  static constexpr size_t DEFAULT_QUEUE_SIZE = 64;
   static constexpr uint16_t CONFIG_META_SETTLE_DELAY_MS = 200;
-  static constexpr uint16_t CONFIG_CHUNK_DELAY_MS = 8;
+  static constexpr uint16_t CONFIG_CHUNK_DELAY_MS = 25;
   static constexpr uint16_t CONFIG_TRANSFER_CHUNK_DATA_SIZE = 80;
 
   void setManagedHandlers(ArmorLinkManagedReceiveFn receiveFn, ArmorLinkManagedSendFn sendFn) {
