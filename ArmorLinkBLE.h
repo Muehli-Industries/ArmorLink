@@ -97,7 +97,9 @@ public:
       _eventTxChar->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED);
     }
 
-    _eventTxChar->addDescriptor(new BLE2902());
+    BLE2902* eventCccd = new BLE2902();
+    eventCccd->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
+    _eventTxChar->addDescriptor(eventCccd);
 
     _logTxChar = service->createCharacteristic(
       ARMORLINK_LOG_TX_UUID,
@@ -108,7 +110,9 @@ public:
       _logTxChar->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED);
     }
 
-    _logTxChar->addDescriptor(new BLE2902());
+    BLE2902* logCccd = new BLE2902();
+    logCccd->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
+    _logTxChar->addDescriptor(logCccd);
 
     service->start();
 

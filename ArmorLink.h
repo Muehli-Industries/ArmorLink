@@ -4753,7 +4753,18 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
 
     if (_isGatewayMode && strlen(msg.source) > 0) {
       const int pairedIndex = findPairedModuleIndexByName(msg.source);
-      if (pairedIndex >= 0) {
+      const bool configTransferPacket =
+        msg.msgType == AL_MSG_CONFIG_META ||
+        msg.msgType == AL_MSG_CONFIG_CHUNK ||
+        msg.msgType == AL_MSG_CONFIG_END;
+
+      const bool handledSystemPresencePacket =
+        equalsIgnoreCase(msg.entity, "system") &&
+        (equalsIgnoreCase(msg.command, "hello") ||
+         equalsIgnoreCase(msg.command, "heartbeat") ||
+         equalsIgnoreCase(msg.command, "sync_request"));
+
+      if (pairedIndex >= 0 && !configTransferPacket && !handledSystemPresencePacket) {
         updateModulePresenceByMac(String(_pairedModules[pairedIndex].mac));
       }
     }

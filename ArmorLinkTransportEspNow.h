@@ -55,6 +55,8 @@ private:
 class ArmorLinkTransportEspNow {
 public:
   static constexpr size_t DEFAULT_QUEUE_SIZE = 20;
+  static constexpr uint16_t CONFIG_META_SETTLE_DELAY_MS = 200;
+  static constexpr uint16_t CONFIG_CHUNK_DELAY_MS = 8;
 
   void setManagedHandlers(ArmorLinkManagedReceiveFn receiveFn, ArmorLinkManagedSendFn sendFn) {
     _managedReceiveFn = receiveFn;
@@ -315,6 +317,7 @@ esp_err_t ensurePeer(const uint8_t* mac) {
 
     esp_err_t result = sendPacketToTarget(target, meta);
     if (result != ESP_OK) return result;
+    delay(CONFIG_META_SETTLE_DELAY_MS);
 
     for (uint16_t i = 0; i < chunkCount; i++) {
       const uint16_t start = i * ARMORLINK_CHUNK_DATA_SIZE;
@@ -330,7 +333,7 @@ esp_err_t ensurePeer(const uint8_t* mac) {
 
       result = sendPacketToTarget(target, chunk);
       if (result != ESP_OK) return result;
-      delay(8);
+      delay(CONFIG_CHUNK_DELAY_MS);
     }
 
     ArmorLinkPacket end = makeArmorLinkBasePacket(AL_MSG_CONFIG_END, source, target.c_str(), entity, "config_end");
