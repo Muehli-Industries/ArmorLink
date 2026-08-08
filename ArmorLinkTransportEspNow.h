@@ -57,6 +57,7 @@ public:
   static constexpr size_t DEFAULT_QUEUE_SIZE = 20;
   static constexpr uint16_t CONFIG_META_SETTLE_DELAY_MS = 200;
   static constexpr uint16_t CONFIG_CHUNK_DELAY_MS = 8;
+  static constexpr uint16_t CONFIG_TRANSFER_CHUNK_DATA_SIZE = 80;
 
   void setManagedHandlers(ArmorLinkManagedReceiveFn receiveFn, ArmorLinkManagedSendFn sendFn) {
     _managedReceiveFn = receiveFn;
@@ -305,7 +306,7 @@ esp_err_t ensurePeer(const uint8_t* mac) {
     bool partial = false
   ) {
     const uint16_t totalLen = (uint16_t)json.length();
-    const uint16_t chunkCount = (totalLen == 0) ? 1 : (uint16_t)((totalLen + ARMORLINK_CHUNK_DATA_SIZE - 1) / ARMORLINK_CHUNK_DATA_SIZE);
+    const uint16_t chunkCount = (totalLen == 0) ? 1 : (uint16_t)((totalLen + CONFIG_TRANSFER_CHUNK_DATA_SIZE - 1) / CONFIG_TRANSFER_CHUNK_DATA_SIZE);
 
     if (chunkCount > ARMORLINK_MAX_CHUNKS) return ESP_ERR_INVALID_SIZE;
 
@@ -320,8 +321,8 @@ esp_err_t ensurePeer(const uint8_t* mac) {
     delay(CONFIG_META_SETTLE_DELAY_MS);
 
     for (uint16_t i = 0; i < chunkCount; i++) {
-      const uint16_t start = i * ARMORLINK_CHUNK_DATA_SIZE;
-      const uint16_t len = min((uint16_t)ARMORLINK_CHUNK_DATA_SIZE, (uint16_t)(totalLen - start));
+      const uint16_t start = i * CONFIG_TRANSFER_CHUNK_DATA_SIZE;
+      const uint16_t len = min((uint16_t)CONFIG_TRANSFER_CHUNK_DATA_SIZE, (uint16_t)(totalLen - start));
 
       ArmorLinkPacket chunk = makeArmorLinkBasePacket(AL_MSG_CONFIG_CHUNK, source, target.c_str(), entity, "config_chunk");
       chunk.requestId = requestId;

@@ -392,21 +392,40 @@ void onBleDisconnected() {
   _startupHelloAcked = false;
   _startupHelloActive = false;
 }
-  void broadcastTelemetryState(bool enabled) {
+
+  void sendGatewayStatePacketToPairedModules(ArmorLinkPacket& packet) {
     if (!_isGatewayMode || !_options.enableEspNow) return;
+
+    for (size_t i = 0; i < _pairedModuleCount && i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
+      if (strlen(_pairedModules[i].mac) == 0) {
+        continue;
+      }
+
+      uint8_t moduleMac[6];
+      if (!armorLinkParseMacString(String(_pairedModules[i].mac), moduleMac)) {
+        continue;
+      }
+
+      armorlinkCopyString(packet.target, sizeof(packet.target), _pairedModules[i].name);
+      _transport.sendPacketToMac(moduleMac, packet);
+      delay(5);
+      yield();
+    }
+  }
+
+  void broadcastTelemetryState(bool enabled) {
+    if (!_isGatewayMode || _module == nullptr || !_options.enableEspNow) return;
 
     ArmorLinkPacket out = makeArmorLinkBasePacket(
       AL_MSG_COMMAND,
       _module->name().c_str(),
-      "*",
+      "",
       "telemetry",
       "set_enabled"
     );
 
     out.valueInt = enabled ? 1 : 0;
-
-    const uint8_t broadcastMac[6] = {255,255,255,255,255,255};
-    _transport.sendPacketToMac(broadcastMac, out);
+    sendGatewayStatePacketToPairedModules(out);
   }
   void broadcastLoggingState(bool enabled) {
     if (!_isGatewayMode || _module == nullptr || !_options.enableEspNow) {
@@ -416,14 +435,13 @@ void onBleDisconnected() {
     ArmorLinkPacket out = makeArmorLinkBasePacket(
       AL_MSG_COMMAND,
       _module->name().c_str(),
-      "*",
+      "",
       "logs",
       "set_enabled"
     );
     out.valueInt = enabled ? 1 : 0;
 
-    const uint8_t broadcastMac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-    _transport.sendPacketToMac(broadcastMac, out);
+    sendGatewayStatePacketToPairedModules(out);
   }
 
   void broadcastRemoteLogLevel(uint8_t level) {
@@ -434,14 +452,13 @@ void onBleDisconnected() {
     ArmorLinkPacket out = makeArmorLinkBasePacket(
       AL_MSG_COMMAND,
       _module->name().c_str(),
-      "*",
+      "",
       "logs",
       "set_level"
     );
     out.valueInt = level;
 
-    const uint8_t broadcastMac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-    _transport.sendPacketToMac(broadcastMac, out);
+    sendGatewayStatePacketToPairedModules(out);
   }
 
   bool startPairing(uint32_t timeoutMs = 30000) {
@@ -1070,6 +1087,14 @@ void onBleDisconnected() {
     if (packet.msgType == AL_MSG_CONFIG_GET &&
         !equalsIgnoreCase(packet.target, localTarget)) {
 
+      if (_isGatewayMode && findPairedModuleIndexByName(packet.target) < 0) {
+        notifyError(
+          packet.requestId,
+          "Module not paired",
+          String(packet.target));
+        return true;
+      }
+
       ArmorLinkPacket out = makeArmorLinkBasePacket(
         AL_MSG_CONFIG_GET,
         localTarget,
@@ -1119,6 +1144,14 @@ void onBleDisconnected() {
     if (packet.msgType == AL_MSG_CONFIG_SET &&
         !equalsIgnoreCase(packet.target, localTarget)) {
 
+      if (_isGatewayMode && findPairedModuleIndexByName(packet.target) < 0) {
+        notifyError(
+          packet.requestId,
+          "Module not paired",
+          String(packet.target));
+        return true;
+      }
+
       ArmorLinkPacket out = makeArmorLinkBasePacket(
         AL_MSG_CONFIG_SET,
         localTarget,
@@ -1149,6 +1182,14 @@ void onBleDisconnected() {
     if (packet.msgType == AL_MSG_COMMAND &&
         !equalsIgnoreCase(packet.target, localTarget) &&
         !equalsIgnoreCase(packet.target, "*")) {
+
+      if (_isGatewayMode && findPairedModuleIndexByName(packet.target) < 0) {
+        notifyError(
+          packet.requestId,
+          "Module not paired",
+          String(packet.target));
+        return true;
+      }
 
       ArmorLinkPacket out = makeArmorLinkBasePacket(
         AL_MSG_COMMAND,
