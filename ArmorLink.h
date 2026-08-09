@@ -532,7 +532,7 @@ void onBleDisconnected() {
     broadcastPairingQuietState(true, _pairingSessionId);
     emitPairingStateEvent("pairing_started");
 
-    const bool ok = sendPairAnnounce();
+    const bool ok = sendPairAnnounceBurst();
     if (ok) {
       _lastPairAnnounceMs = millis();
       emitPairingStateEvent("pairing_ping");
@@ -1453,6 +1453,7 @@ void onBleDisconnected() {
 
 private:
   uint16_t _lastRespondedPairSessionId = 0;
+  uint32_t _lastPairResponseMs = 0;
   ArmorLinkModule* _module = nullptr;
   ArmorLinkOptions _options;
   ArmorLinkStorage _storage;
@@ -3038,6 +3039,9 @@ void printPairingCandidates() {
   uint8_t _startupStateSyncAttempt = 0;
 
   static constexpr uint32_t PAIR_ANNOUNCE_INTERVAL_MS = 10000;
+  static constexpr uint32_t PAIR_RESPONSE_REPEAT_MIN_INTERVAL_MS = 2000;
+  static constexpr uint8_t PAIR_ANNOUNCE_SEND_ATTEMPTS = 3;
+  static constexpr uint8_t PAIR_RESPONSE_SEND_ATTEMPTS = 3;
   static constexpr size_t MAX_PENDING_PAIRING_CANDIDATES = 16;
 
   ArmorLinkPairingCandidate _pendingCandidates[MAX_PENDING_PAIRING_CANDIDATES]{};
@@ -4199,7 +4203,7 @@ void emitModulePresenceSnapshot() {
     }
 
     if ((uint32_t)(now - _lastPairAnnounceMs) >= PAIR_ANNOUNCE_INTERVAL_MS) {
-      if (sendPairAnnounce()) {
+      if (sendPairAnnounceBurst()) {
         Serial.printf("[PAIR][GW] Announcing pairing session %u\n", _pairingSessionId);
         _lastPairAnnounceMs = now;
         emitPairingStateEvent("pairing_ping");
@@ -4345,6 +4349,23 @@ static void handleBleConnectedStatic() {
     return _transport.sendPacketToMac(broadcastMac, out) == ESP_OK;
   }
 
+  bool sendPairAnnounceBurst() {
+    bool anyOk = false;
+
+    for (uint8_t attempt = 0; attempt < PAIR_ANNOUNCE_SEND_ATTEMPTS; ++attempt) {
+      if (sendPairAnnounce()) {
+        anyOk = true;
+      }
+
+      if (attempt + 1 < PAIR_ANNOUNCE_SEND_ATTEMPTS) {
+        delay(45);
+        yield();
+      }
+    }
+
+    return anyOk;
+  }
+
   void handlePairAnnouncePacket(const ArmorLinkPacket& msg) {
     AL_VERBOSELN("[PAIR] Announce packet received");
 
@@ -4384,8 +4405,11 @@ static void handleBleConnectedStatic() {
       return;
     }
 
-    if (_lastRespondedPairSessionId == sessionId) {
-      AL_VERBOSELN("[PAIR] Ignored: already responded to this session");
+    const uint32_t now = millis();
+    if (_lastRespondedPairSessionId == sessionId &&
+        _lastPairResponseMs != 0 &&
+        (uint32_t)(now - _lastPairResponseMs) < PAIR_RESPONSE_REPEAT_MIN_INTERVAL_MS) {
+      AL_VERBOSELN("[PAIR] Ignored: response rate limited for this session");
       return;
     }
 
@@ -4414,21 +4438,33 @@ static void handleBleConnectedStatic() {
     }
 
     uint8_t gatewayMacBytes[6];
+    const bool hasGatewayMac = armorLinkParseMacString(gatewayMac, gatewayMacBytes);
     esp_err_t unicastResult = ESP_ERR_NOT_FOUND;
+    esp_err_t broadcastResult = ESP_ERR_NOT_FOUND;
 
-    if (armorLinkParseMacString(gatewayMac, gatewayMacBytes)) {
-      unicastResult = _transport.sendPacketToMac(gatewayMacBytes, out);
-    } else {
+    if (!hasGatewayMac) {
       AL_VERBOSELN("[PAIR] Invalid gateway MAC in announce payload");
     }
 
-    delay(20);
-    yield();
-
     const uint8_t broadcastMac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-    esp_err_t broadcastResult = _transport.sendPacketToMac(broadcastMac, out);
+    for (uint8_t attempt = 0; attempt < PAIR_RESPONSE_SEND_ATTEMPTS; ++attempt) {
+      if (hasGatewayMac) {
+        unicastResult = _transport.sendPacketToMac(gatewayMacBytes, out);
+      }
 
-    Serial.printf("[PAIR] Response results | unicast=%s | broadcast=%s | gateway=%s (%s) | sessionId=%u | payloadLen=%u\n",
+      delay(20);
+      yield();
+
+      broadcastResult = _transport.sendPacketToMac(broadcastMac, out);
+
+      if (attempt + 1 < PAIR_RESPONSE_SEND_ATTEMPTS) {
+        delay(45);
+        yield();
+      }
+    }
+
+    Serial.printf("[PAIR] Response results | attempts=%u | unicast=%s | broadcast=%s | gateway=%s (%s) | sessionId=%u | payloadLen=%u\n",
+                  PAIR_RESPONSE_SEND_ATTEMPTS,
                   esp_err_to_name(unicastResult),
                   esp_err_to_name(broadcastResult),
                   gatewayName.c_str(),
@@ -4438,6 +4474,7 @@ static void handleBleConnectedStatic() {
 
     if (unicastResult == ESP_OK || broadcastResult == ESP_OK) {
       _lastRespondedPairSessionId = sessionId;
+      _lastPairResponseMs = now;
     }
   }
 
