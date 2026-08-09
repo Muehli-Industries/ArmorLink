@@ -250,6 +250,8 @@ public:
   void loop() {
     bleProcessPendingConfigTransfer();
     processEspNowQueue();
+    remotePairingQuietTick();
+    pairingQuietStopRepeatTick();
     pairingTick();
     presenceTick();
     startupHelloTick();
@@ -395,6 +397,7 @@ void onBleDisconnected() {
 
   void sendGatewayStatePacketToPairedModules(ArmorLinkPacket& packet) {
     if (!_isGatewayMode || !_options.enableEspNow) return;
+    if (_pairingActive) return;
 
     for (size_t i = 0; i < _pairedModuleCount && i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
       if (strlen(_pairedModules[i].mac) == 0) {
@@ -461,6 +464,47 @@ void onBleDisconnected() {
     sendGatewayStatePacketToPairedModules(out);
   }
 
+  void broadcastPairingQuietState(bool active, uint16_t sessionId) {
+    if (!_isGatewayMode || _module == nullptr || !_options.enableEspNow) {
+      return;
+    }
+
+    String payload;
+    {
+      StaticJsonDocument<96> doc;
+      doc["sessionId"] = sessionId;
+      doc["active"] = active;
+      serializeJson(doc, payload);
+    }
+
+    ArmorLinkPacket out = makeArmorLinkBasePacket(
+      AL_MSG_COMMAND,
+      _module->name().c_str(),
+      "*",
+      "pairing",
+      active ? "quiet_start" : "quiet_stop"
+    );
+    out.valueInt = sessionId;
+    setArmorLinkPacketPayload(out, payload);
+
+    const uint8_t broadcastMac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    esp_err_t result = ESP_FAIL;
+    const uint8_t attempts = active ? 2 : 3;
+
+    for (uint8_t attempt = 0; attempt < attempts; ++attempt) {
+      result = _transport.sendPacketToMac(broadcastMac, out);
+      if (attempt + 1 < attempts) {
+        delay(active ? 20 : 35);
+        yield();
+      }
+    }
+
+    Serial.printf("[PAIR][GW] Pairing quiet %s broadcast | sessionId=%u | result=%s\n",
+                  active ? "start" : "stop",
+                  sessionId,
+                  esp_err_to_name(result));
+  }
+
   bool startPairing(uint32_t timeoutMs = 30000) {
     if (!_isGatewayMode) {
       return false;
@@ -477,11 +521,15 @@ void onBleDisconnected() {
     }
     _lastPairAnnounceMs = 0;
     clearPendingPairingCandidates();
+    _pairingQuietStopRepeatSessionId = 0;
+    _pairingQuietStopRepeatUntilMs = 0;
+    _lastPairingQuietStopMs = 0;
 
     Serial.printf("[PAIR][GW] Pairing started | sessionId=%u | timeoutMs=%lu\n",
                   _pairingSessionId,
                   (unsigned long)timeoutMs);
 
+    broadcastPairingQuietState(true, _pairingSessionId);
     emitPairingStateEvent("pairing_started");
 
     const bool ok = sendPairAnnounce();
@@ -500,11 +548,13 @@ void onBleDisconnected() {
 
     const uint16_t stoppedSessionId = _pairingSessionId;
 
+    broadcastPairingQuietState(false, stoppedSessionId);
     _pairingActive = false;
     _pairingEndsAtMs = 0;
     _pairingSessionId = 0;
     _lastPairAnnounceMs = 0;
     clearPendingPairingCandidates();
+    schedulePairingQuietStopRepeat(stoppedSessionId);
 
     Serial.printf("[PAIR][GW] Pairing stopped | sessionId=%u\n", stoppedSessionId);
     emitPairingStateEvent("pairing_stopped", stoppedSessionId);
@@ -590,9 +640,10 @@ void onBleDisconnected() {
     updateModulePresenceByMac(_pendingCandidates[index].mac);
 
     emitPairingCompletedEvent(_pendingCandidates[index]);
-    emitModulePresenceSnapshot();
     _pendingCandidates[index].occupied = false;
     rebuildPendingCandidateCount();
+    stopPairing();
+    emitModulePresenceSnapshot();
     return true;
   }
   ArmorLinkTelemetryBuilder telemetryGroup(const char* group, const char* name) {
@@ -618,9 +669,13 @@ void onBleDisconnected() {
       command
     );
     setArmorLinkPacketPayload(out, value);
-    if (_isGatewayMode) 
-    {
+
+    if (!_isGatewayMode &&
+        isRemotePairingQuietActive() &&
+        !isPairingTraffic(out)) {
+      return ESP_OK;
     }
+
     return _transport.sendPacketToTarget(String(target), out);
   }
 
@@ -644,6 +699,12 @@ void onBleDisconnected() {
     );
 
     setArmorLinkPacketPayload(out, value);
+
+    if (!_isGatewayMode &&
+        isRemotePairingQuietActive() &&
+        !isPairingTraffic(out)) {
+      return ESP_OK;
+    }
 
     const uint8_t broadcastMac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
     return _transport.sendPacketToMac(broadcastMac, out);
@@ -714,6 +775,10 @@ void onBleDisconnected() {
 
     if (_options.defaultLogTarget.isEmpty()) {
       return ESP_ERR_NOT_FOUND;
+    }
+
+    if (!_isGatewayMode && isRemotePairingQuietActive()) {
+      return ESP_OK;
     }
         if (!shouldSendRemoteLog(level)) {
       return ESP_OK;
@@ -944,9 +1009,9 @@ void onBleDisconnected() {
       return true;
     }
 
-    if (packet.msgType == AL_MSG_COMMAND &&
-        equalsIgnoreCase(packet.entity, "pairing") &&
-        equalsIgnoreCase(packet.target, localTarget)) {
+  if (packet.msgType == AL_MSG_COMMAND &&
+      equalsIgnoreCase(packet.entity, "pairing") &&
+      equalsIgnoreCase(packet.target, localTarget)) {
 
       const String textPayload = payload;
 
@@ -987,6 +1052,14 @@ void onBleDisconnected() {
 
         return true;
       }
+    }
+
+    if (_isGatewayMode && _pairingActive) {
+      notifyError(
+        packet.requestId,
+        "Pairing active",
+        "Only pairing commands are accepted while pairing is active");
+      return true;
     }
 
     if (packet.msgType == AL_MSG_COMMAND &&
@@ -1273,6 +1346,14 @@ void onBleDisconnected() {
   ) {
 
     if (!_remoteTelemetryEnabled && !_options.forceRemoteLogging) {
+      return ESP_OK;
+    }
+
+    if (_isGatewayMode && _pairingActive) {
+      return ESP_OK;
+    }
+
+    if (!_isGatewayMode && isRemotePairingQuietActive()) {
       return ESP_OK;
     }
 
@@ -2936,6 +3017,12 @@ void printPairingCandidates() {
   uint16_t _pairingSessionId = 0;
   uint32_t _pairingEndsAtMs = 0;
   uint32_t _lastPairAnnounceMs = 0;
+  bool _remotePairingQuiet = false;
+  uint16_t _remotePairingQuietSessionId = 0;
+  uint32_t _remotePairingQuietUntilMs = 0;
+  uint16_t _pairingQuietStopRepeatSessionId = 0;
+  uint32_t _pairingQuietStopRepeatUntilMs = 0;
+  uint32_t _lastPairingQuietStopMs = 0;
 
   bool _startupHelloActive = false;
   bool _startupHelloAcked = false;
@@ -2955,6 +3042,127 @@ void printPairingCandidates() {
 
   ArmorLinkPairingCandidate _pendingCandidates[MAX_PENDING_PAIRING_CANDIDATES]{};
   size_t _pendingCandidateCount = 0;
+
+  bool isPairingTraffic(const ArmorLinkPacket& msg) const {
+    if (msg.msgType == AL_MSG_PAIR_ANNOUNCE ||
+        msg.msgType == AL_MSG_PAIR_RESPONSE ||
+        msg.msgType == AL_MSG_PAIR_ACCEPT) {
+      return true;
+    }
+
+    return msg.msgType == AL_MSG_COMMAND &&
+           equalsIgnoreCase(msg.entity, "pairing");
+  }
+
+  uint16_t pairingSessionFromPacket(const ArmorLinkPacket& msg) const {
+    if (msg.valueInt > 0 && msg.valueInt <= 0xFFFF) {
+      return static_cast<uint16_t>(msg.valueInt);
+    }
+
+    const String payload = armorLinkPacketPayloadToString(msg);
+    if (payload.isEmpty()) {
+      return 0;
+    }
+
+    StaticJsonDocument<96> doc;
+    if (deserializeJson(doc, payload) != DeserializationError::Ok) {
+      return 0;
+    }
+
+    return doc["sessionId"] | doc["sid"] | 0;
+  }
+
+  bool isRemotePairingQuietActive() {
+    if (!_remotePairingQuiet) {
+      return false;
+    }
+
+    if (_remotePairingQuietUntilMs != 0 &&
+        (int32_t)(millis() - _remotePairingQuietUntilMs) >= 0) {
+      Serial.printf("[PAIR] Remote pairing quiet expired | sessionId=%u\n",
+                    _remotePairingQuietSessionId);
+      _remotePairingQuiet = false;
+      _remotePairingQuietSessionId = 0;
+      _remotePairingQuietUntilMs = 0;
+      return false;
+    }
+
+    return true;
+  }
+
+  void remotePairingQuietTick() {
+    isRemotePairingQuietActive();
+  }
+
+  void enterRemotePairingQuiet(uint16_t sessionId, uint32_t durationMs = 45000) {
+    if (_isGatewayMode || sessionId == 0) {
+      return;
+    }
+
+    const bool changed =
+      !_remotePairingQuiet ||
+      _remotePairingQuietSessionId != sessionId;
+
+    _remotePairingQuiet = true;
+    _remotePairingQuietSessionId = sessionId;
+    _remotePairingQuietUntilMs = millis() + durationMs;
+
+    if (changed) {
+      Serial.printf("[PAIR] Remote pairing quiet started | sessionId=%u | timeoutMs=%lu\n",
+                    sessionId,
+                    (unsigned long)durationMs);
+    }
+  }
+
+  void clearRemotePairingQuiet(uint16_t sessionId = 0) {
+    if (!_remotePairingQuiet) {
+      return;
+    }
+
+    if (sessionId != 0 && _remotePairingQuietSessionId != sessionId) {
+      return;
+    }
+
+    Serial.printf("[PAIR] Remote pairing quiet stopped | sessionId=%u\n",
+                  _remotePairingQuietSessionId);
+
+    _remotePairingQuiet = false;
+    _remotePairingQuietSessionId = 0;
+    _remotePairingQuietUntilMs = 0;
+  }
+
+  void schedulePairingQuietStopRepeat(uint16_t sessionId) {
+    if (!_isGatewayMode || sessionId == 0) {
+      return;
+    }
+
+    _pairingQuietStopRepeatSessionId = sessionId;
+    _pairingQuietStopRepeatUntilMs = millis() + 2500;
+    _lastPairingQuietStopMs = 0;
+  }
+
+  void pairingQuietStopRepeatTick() {
+    if (!_isGatewayMode || _pairingQuietStopRepeatSessionId == 0) {
+      return;
+    }
+
+    const uint32_t now = millis();
+    if ((int32_t)(now - _pairingQuietStopRepeatUntilMs) >= 0) {
+      _pairingQuietStopRepeatSessionId = 0;
+      _pairingQuietStopRepeatUntilMs = 0;
+      _lastPairingQuietStopMs = 0;
+      return;
+    }
+
+    if (_lastPairingQuietStopMs != 0 &&
+        (uint32_t)(now - _lastPairingQuietStopMs) < 300) {
+      return;
+    }
+
+    _lastPairingQuietStopMs = now;
+    broadcastPairingQuietState(false, _pairingQuietStopRepeatSessionId);
+  }
+
   bool allowTelemetrySend(const String& key) {
     uint32_t now = millis();
 
@@ -3225,6 +3433,23 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
     if (msg.msgType != AL_MSG_COMMAND) {
       return false;
     }
+
+    if (!_isGatewayMode &&
+        equalsIgnoreCase(msg.entity, "pairing") &&
+        equalsIgnoreCase(msg.command, "quiet_start")) {
+      const uint16_t sessionId = pairingSessionFromPacket(msg);
+      enterRemotePairingQuiet(sessionId);
+      return true;
+    }
+
+    if (!_isGatewayMode &&
+        equalsIgnoreCase(msg.entity, "pairing") &&
+        equalsIgnoreCase(msg.command, "quiet_stop")) {
+      const uint16_t sessionId = pairingSessionFromPacket(msg);
+      clearRemotePairingQuiet(sessionId);
+      return true;
+    }
+
     if (!_isGatewayMode &&
         equalsIgnoreCase(msg.entity, "pairing") &&
         equalsIgnoreCase(msg.command, "unpair")) {
@@ -3335,8 +3560,8 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
       return true;
     }
 
-    const String moduleName = String((const char*)(doc["moduleName"] | msg.source));
-    const String moduleMac  = String((const char*)(doc["moduleMac"] | ""));
+    const String moduleName = String((const char*)(doc["mn"] | doc["moduleName"] | msg.source));
+    const String moduleMac  = String((const char*)(doc["mm"] | doc["moduleMac"] | ""));
     const String moduleVersion = String((const char*)(doc["mv"] | doc["moduleVersion"] | "1.0"));
     const String armorLinkVersion = String((const char*)(doc["av"] | doc["armorLinkVersion"] | ""));
 
@@ -3508,6 +3733,10 @@ void startupStateSyncTick() {
 bool sendStateSyncRequest() {
   if (_module == nullptr) return false;
 
+  if (isRemotePairingQuietActive()) {
+    return false;
+  }
+
   if (strlen(_pairingInfo.gatewayName) == 0 || strlen(_pairingInfo.gatewayMac) == 0) {
     return false;
   }
@@ -3553,6 +3782,10 @@ void heartbeatTick() {
     return;
   }
 
+  if (isRemotePairingQuietActive()) {
+    return;
+  }
+
   const uint32_t intervalMs = _options.moduleHeartbeatIntervalMs;
   if (intervalMs == 0) {
     return;
@@ -3570,6 +3803,10 @@ void heartbeatTick() {
 
 bool sendHeartbeat() {
   if (_module == nullptr) {
+    return false;
+  }
+
+  if (isRemotePairingQuietActive()) {
     return false;
   }
 
@@ -3617,6 +3854,10 @@ bool sendHeartbeat() {
       return;
     }
 
+    if (_pairingActive) {
+      return;
+    }
+
     const uint32_t interval = _options.modulePresenceCheckIntervalMs;
     const uint32_t timeoutMs = _options.moduleTimeoutMs;
 
@@ -3630,6 +3871,10 @@ bool sendHeartbeat() {
     }
 
     _lastPresenceCheckMs = now;
+    if (_pairingQuietStopRepeatSessionId != 0) {
+      broadcastPairingQuietState(false, _pairingQuietStopRepeatSessionId);
+    }
+
     Serial.printf(
       "[PRESENCE] Check running. paired=%u\n",
       (unsigned)_pairedModuleCount
@@ -3728,6 +3973,10 @@ void startupHelloTick() {
     return;
   }
 
+  if (isRemotePairingQuietActive()) {
+    return;
+  }
+
   const uint32_t now = millis();
 
   if ((int32_t)(now - _startupHelloUntilMs) >= 0) {
@@ -3751,6 +4000,10 @@ void startupHelloTick() {
 
 bool sendStartupHello() {
   if (_module == nullptr) {
+    return false;
+  }
+
+  if (isRemotePairingQuietActive()) {
     return false;
   }
 
@@ -3827,6 +4080,9 @@ void sendHelloAckToModule(const char* moduleName, const char* moduleMac) {
 void emitModulePresenceSnapshot() {
   if (!_isGatewayMode) {
     return;
+  }
+  if (_pairingQuietStopRepeatSessionId != 0) {
+    broadcastPairingQuietState(false, _pairingQuietStopRepeatSessionId);
   }
   Serial.printf("[PRESENCE] Snapshot start. pairedModuleCount=%u\n",
                   (unsigned)_pairedModuleCount);
@@ -3933,6 +4189,9 @@ void emitModulePresenceSnapshot() {
 
     if ((int32_t)(now - _pairingEndsAtMs) >= 0) {
       const uint16_t timedOutSessionId = _pairingSessionId;
+      if (!_pairingActive || timedOutSessionId == 0) {
+        return;
+      }
       Serial.printf("[PAIR][GW] Pairing timeout | sessionId=%u\n", timedOutSessionId);
       emitPairingStateEvent("pairing_timeout", timedOutSessionId);
       stopPairing();
@@ -3961,6 +4220,14 @@ void emitModulePresenceSnapshot() {
       }
 
       if (level < _remoteLogLevel) {        
+        return;
+      }
+
+      if (_isGatewayMode && _pairingActive) {
+        return;
+      }
+
+      if (!_isGatewayMode && isRemotePairingQuietActive()) {
         return;
       }
 
@@ -4086,13 +4353,6 @@ static void handleBleConnectedStatic() {
       return;
     }
 
-    if (_pairingInfo.paired) {
-      AL_VERBOSELN("[PAIR] Ignored: module already paired");
-      return;
-    }
-
-    
-
     const String announcePayload = armorLinkPacketPayloadToString(msg);
     StaticJsonDocument<160> doc;
     auto err = deserializeJson(doc, announcePayload);
@@ -4114,6 +4374,13 @@ static void handleBleConnectedStatic() {
               sessionId);
     if (sessionId == 0 || gatewayName.isEmpty() || gatewayMac.isEmpty()) {
       AL_VERBOSELN("[PAIR] Ignored: invalid announce payload");
+      return;
+    }
+
+    enterRemotePairingQuiet(sessionId);
+
+    if (_pairingInfo.paired) {
+      AL_VERBOSELN("[PAIR] Quiet active; paired module does not respond to announce");
       return;
     }
 
@@ -4604,9 +4871,18 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
       return;
     }
 
+    const uint16_t sessionId = sessionIdOverride != 0 ? sessionIdOverride : _pairingSessionId;
+    if (equalsIgnoreCase(type, "pairing_timeout") &&
+        (!_pairingActive || sessionId == 0)) {
+      Serial.printf("[PAIR][GW] Suppressed stale pairing_timeout | sessionId=%u | active=%s\n",
+                    sessionId,
+                    _pairingActive ? "true" : "false");
+      return;
+    }
+
     StaticJsonDocument<160> doc;
     doc["type"] = type;
-    doc["sessionId"] = sessionIdOverride != 0 ? sessionIdOverride : _pairingSessionId;
+    doc["sessionId"] = sessionId;
 
     String out;
     serializeJson(doc, out);
@@ -4830,6 +5106,26 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
 }
 
   void processIncomingEspNowPacket(const ArmorLinkPacket& msg) {
+    if (_isGatewayMode && _pairingActive && !isPairingTraffic(msg)) {
+      Serial.printf("[PAIR][GW] Quiet drop while pairing | source=%s type=%u entity=%s command=%s\n",
+                    msg.source,
+                    msg.msgType,
+                    msg.entity,
+                    msg.command);
+      return;
+    }
+
+    if (!_isGatewayMode &&
+        isRemotePairingQuietActive() &&
+        !isPairingTraffic(msg)) {
+      Serial.printf("[PAIR] Quiet ignore while gateway pairing | source=%s type=%u entity=%s command=%s\n",
+                    msg.source,
+                    msg.msgType,
+                    msg.entity,
+                    msg.command);
+      return;
+    }
+
     if (_isGatewayMode && !isGatewayPacketAllowedFromUnknownSource(msg)) {
       Serial.printf("[PAIR][GW] Dropping packet from unknown module source=%s type=%u entity=%s command=%s\n",
                     msg.source,
@@ -5135,6 +5431,10 @@ inline esp_err_t ArmorLinkTelemetryBuilder::send() {
   }
 
   if (!_rt->_remoteTelemetryEnabled && !_rt->_options.forceRemoteLogging) {
+    return ESP_OK;
+  }
+
+  if (!_rt->_isGatewayMode && _rt->isRemotePairingQuietActive()) {
     return ESP_OK;
   }
 
