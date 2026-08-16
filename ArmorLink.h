@@ -1148,6 +1148,15 @@ void onBleDisconnected() {
       Serial.printf("[CONFIG] local descriptor length=%u\n",
                     static_cast<unsigned>(json.length()));
 
+      if (json.isEmpty()) {
+        notifyError(
+          packet.requestId,
+          "Config descriptor build failed",
+          "Descriptor allocation failed"
+        );
+        return true;
+      }
+
       const bool queued = bleQueueConfigJsonChunked(
         localTarget,
         "",
@@ -3038,7 +3047,7 @@ void printPairingCandidates() {
   uint32_t _lastStartupStateSyncMs = 0;
   uint8_t _startupStateSyncAttempt = 0;
 
-  static constexpr uint32_t PAIR_ANNOUNCE_INTERVAL_MS = 10000;
+  static constexpr uint32_t PAIR_ANNOUNCE_INTERVAL_MS = 2000;
   static constexpr uint32_t PAIR_RESPONSE_REPEAT_MIN_INTERVAL_MS = 2000;
   static constexpr uint8_t PAIR_ANNOUNCE_SEND_ATTEMPTS = 3;
   static constexpr uint8_t PAIR_RESPONSE_SEND_ATTEMPTS = 3;
@@ -4203,12 +4212,13 @@ void emitModulePresenceSnapshot() {
     }
 
     if ((uint32_t)(now - _lastPairAnnounceMs) >= PAIR_ANNOUNCE_INTERVAL_MS) {
-      if (sendPairAnnounceBurst()) {
-        Serial.printf("[PAIR][GW] Announcing pairing session %u\n", _pairingSessionId);
-        _lastPairAnnounceMs = now;
-        emitPairingStateEvent("pairing_ping");
-        emitPendingPairingCandidateEvents();
-      }
+      const bool announced = sendPairAnnounceBurst();
+      Serial.printf("[PAIR][GW] Announcing pairing session %u | result=%s\n",
+                    _pairingSessionId,
+                    announced ? "sent" : "failed");
+      _lastPairAnnounceMs = now;
+      emitPairingStateEvent("pairing_ping");
+      emitPendingPairingCandidateEvents();
     }
   }
 
@@ -5268,6 +5278,11 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         Serial.printf("[CONFIG] descriptor length=%u for requestId=%u\n",
                       static_cast<unsigned>(json.length()),
                       msg.requestId);
+
+        if (json.isEmpty()) {
+          logError("config", "get", "Descriptor allocation failed");
+          break;
+        }
 
         esp_err_t result = _transport.sendConfigJsonChunkedToTarget(
           String(msg.source),

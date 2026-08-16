@@ -58,16 +58,20 @@ public:
   }
 
 private:
-  static constexpr size_t DescriptorJsonCapacity = 65536;
+  static constexpr size_t DescriptorJsonCapacity = 32768;
 
   static String buildWithOptions(const ArmorLinkModule& module, bool richMetadata) {
-    DynamicJsonDocument doc(DescriptorJsonCapacity);
+    size_t measuredLength = 0;
 
-    if (!populateDocument(module, doc, richMetadata)) {
-      return "";
+    {
+      DynamicJsonDocument doc(DescriptorJsonCapacity);
+
+      if (!populateDocument(module, doc, richMetadata)) {
+        return "";
+      }
+
+      measuredLength = measureJson(doc);
     }
-
-    const size_t measuredLength = measureJson(doc);
 
     String json;
     if (!json.reserve(measuredLength + 1)) {
@@ -75,6 +79,11 @@ private:
           "[DESCRIPTOR] JSON string allocation failed (%u bytes, rich=%s)\n",
           static_cast<unsigned>(measuredLength),
           richMetadata ? "true" : "false");
+      return "";
+    }
+
+    DynamicJsonDocument doc(DescriptorJsonCapacity);
+    if (!populateDocument(module, doc, richMetadata)) {
       return "";
     }
 
