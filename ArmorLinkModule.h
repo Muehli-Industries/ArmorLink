@@ -747,7 +747,9 @@ public:
                   const String& version = "1.0")
       : _name(name),
         _type(type),
-        _version(version.isEmpty() ? "1.0" : version) {}
+        _version(version.isEmpty() ? "1.0" : version) {
+    clampName();
+  }
 
   const String& name() const { return _name; }
   ArmorLinkModuleType type() const { return _type; }
@@ -763,10 +765,7 @@ public:
     }
 
     _name = value;
-
-    if (_name.length() > ARMORLINK_NAME_MAX_LEN) {
-      _name.remove(ARMORLINK_NAME_MAX_LEN);
-    }
+    clampName();
 
     return *this;
   }
@@ -811,6 +810,12 @@ public:
   }
 
 private:
+  void clampName() {
+    if (_name.length() > ARMORLINK_NAME_MAX_LEN) {
+      _name.remove(ARMORLINK_NAME_MAX_LEN);
+    }
+  }
+
   String _name;
   ArmorLinkModuleType _type;
   String _version = "1.0";

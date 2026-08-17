@@ -85,6 +85,26 @@ public:
           }
           break;
 
+        case ArmorLinkFieldKind::Float:
+          if (field.floatBinding.ptr) {
+            const float loadedValue = prefs.getFloat(storageKey.c_str(), *field.floatBinding.ptr);
+            float finalValue = loadedValue;
+
+            if (field.hasFloatRange) {
+              finalValue = clampFloatValue(field, loadedValue);
+
+              if (finalValue != loadedValue) {
+                Serial.printf("[CONFIG] Clamped persisted value for %s from %.3f to %.3f\n",
+                              field.key.c_str(),
+                              loadedValue,
+                              finalValue);
+              }
+            }
+
+            *field.floatBinding.ptr = finalValue;
+          }
+          break;
+
         case ArmorLinkFieldKind::Readonly:
         default:
           break;
@@ -136,6 +156,18 @@ public:
         if (field.stringBinding.ptr) {
           prefs.putString(storageKey.c_str(), *field.stringBinding.ptr);
           ok = true;
+        }
+        break;
+
+      case ArmorLinkFieldKind::Float:
+        if (field.floatBinding.ptr) {
+          float value = *field.floatBinding.ptr;
+
+          if (field.hasFloatRange) {
+            value = clampFloatValue(field, value);
+          }
+
+          ok = prefs.putFloat(storageKey.c_str(), value) > 0;
         }
         break;
 
@@ -375,6 +407,22 @@ private:
 
     if (value > field.maxInt) {
       return field.maxInt;
+    }
+
+    return value;
+  }
+
+  static float clampFloatValue(const ArmorLinkConfigFieldDef& field, float value) {
+    if (!field.hasFloatRange) {
+      return value;
+    }
+
+    if (value < field.minFloat) {
+      return field.minFloat;
+    }
+
+    if (value > field.maxFloat) {
+      return field.maxFloat;
     }
 
     return value;

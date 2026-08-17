@@ -9,21 +9,44 @@
 
 class ArmorLinkDescriptor {
 public:
+  enum class Profile {
+    Ble,
+    WebSerial
+  };
+
+  static constexpr size_t WebSerialDescriptorJsonCapacity = 65536;
+  static constexpr size_t BleDescriptorJsonCapacity = 32768;
+  static constexpr size_t BleDescriptorBufferSize = 12288;
+  static constexpr size_t RichDescriptorJsonCapacity = WebSerialDescriptorJsonCapacity;
+  static constexpr size_t CompactDescriptorJsonCapacity = BleDescriptorJsonCapacity;
+  static constexpr size_t CompactDescriptorStringReserve = BleDescriptorJsonCapacity;
+
   static String build(const ArmorLinkModule& module) {
-    String json = buildWithOptions(module, true);
+    return buildWebSerial(module);
+  }
+
+  static String buildBle(const ArmorLinkModule& module) {
+    return buildWithProfile(module, Profile::Ble, BleDescriptorJsonCapacity);
+  }
+
+  static String buildWebSerial(const ArmorLinkModule& module) {
+    String json = buildWithProfile(module, Profile::WebSerial, WebSerialDescriptorJsonCapacity);
     if (!json.isEmpty()) {
       return json;
     }
 
-    Serial.println("[DESCRIPTOR] Full descriptor failed, retrying compact descriptor");
-    return buildWithOptions(module, false);
+    Serial.println("[DESCRIPTOR] WebSerial descriptor failed, retrying BLE descriptor");
+    return buildBle(module);
   }
 
   static bool write(const ArmorLinkModule& module, Print& out, size_t* length = nullptr) {
-    DynamicJsonDocument doc(DescriptorJsonCapacity);
+    return writeWebSerial(module, out, length);
+  }
 
-    if (!populateDocument(module, doc, true) &&
-        !populateDocument(module, doc, false)) {
+  static bool writeWebSerial(const ArmorLinkModule& module, Print& out, size_t* length = nullptr) {
+    DynamicJsonDocument doc(WebSerialDescriptorJsonCapacity);
+
+    if (!populateDocument(module, doc, Profile::WebSerial)) {
       return false;
     }
 
@@ -45,10 +68,13 @@ public:
   }
 
   static bool measure(const ArmorLinkModule& module, size_t& length) {
-    DynamicJsonDocument doc(DescriptorJsonCapacity);
+    return measureWebSerial(module, length);
+  }
 
-    if (!populateDocument(module, doc, true) &&
-        !populateDocument(module, doc, false)) {
+  static bool measureWebSerial(const ArmorLinkModule& module, size_t& length) {
+    DynamicJsonDocument doc(WebSerialDescriptorJsonCapacity);
+
+    if (!populateDocument(module, doc, Profile::WebSerial)) {
       length = 0;
       return false;
     }
@@ -57,16 +83,127 @@ public:
     return true;
   }
 
-private:
-  static constexpr size_t DescriptorJsonCapacity = 32768;
+  static bool populateJson(const ArmorLinkModule& module,
+                           DynamicJsonDocument& doc,
+                           bool richMetadata) {
+    return populateDocument(
+      module,
+      doc,
+      richMetadata ? Profile::WebSerial : Profile::Ble);
+  }
 
-  static String buildWithOptions(const ArmorLinkModule& module, bool richMetadata) {
+  static bool populateBleJson(const ArmorLinkModule& module,
+                              DynamicJsonDocument& doc) {
+    return populateDocument(module, doc, Profile::Ble);
+  }
+
+  static bool populateWebSerialJson(const ArmorLinkModule& module,
+                                    DynamicJsonDocument& doc) {
+    return populateDocument(module, doc, Profile::WebSerial);
+  }
+
+  static bool buildCompactInto(const ArmorLinkModule& module,
+                               char* buffer,
+                               size_t bufferSize,
+                               size_t& length) {
+    return buildBleInto(module, buffer, bufferSize, length);
+  }
+
+  static bool buildBleInto(const ArmorLinkModule& module,
+                           char* buffer,
+                           size_t bufferSize,
+                           size_t& length) {
+    length = 0;
+    if (buffer == nullptr || bufferSize == 0) {
+      return false;
+    }
+
+    buffer[0] = '\0';
+
+    DynamicJsonDocument doc(BleDescriptorJsonCapacity);
+    if (!populateDocument(module, doc, Profile::Ble)) {
+      return false;
+    }
+
+    const size_t measuredLength = measureJson(doc);
+    if (measuredLength + 1 > bufferSize) {
+      Serial.printf(
+          "[DESCRIPTOR] BLE JSON buffer too small (%u of %u bytes)\n",
+          static_cast<unsigned>(measuredLength),
+          static_cast<unsigned>(bufferSize));
+      return false;
+    }
+
+    length = serializeJson(doc, buffer, bufferSize);
+    if (length != measuredLength) {
+      Serial.printf(
+          "[DESCRIPTOR] BLE JSON buffer serialization incomplete (%u of %u bytes)\n",
+          static_cast<unsigned>(length),
+          static_cast<unsigned>(measuredLength));
+      length = 0;
+      buffer[0] = '\0';
+      return false;
+    }
+
+    return true;
+  }
+
+private:
+  static String buildWithProfile(const ArmorLinkModule& module,
+                                 Profile profile,
+                                 size_t jsonCapacity) {
+    if (profile == Profile::Ble) {
+      size_t measuredLength = 0;
+
+      {
+        DynamicJsonDocument doc(jsonCapacity);
+        if (!populateDocument(module, doc, Profile::Ble)) {
+          return "";
+        }
+
+        measuredLength = measureJson(doc);
+      }
+
+      if (measuredLength + 1 > CompactDescriptorStringReserve) {
+        Serial.printf(
+            "[DESCRIPTOR] BLE JSON reserve too small (%u of %u bytes)\n",
+            static_cast<unsigned>(measuredLength),
+            static_cast<unsigned>(CompactDescriptorStringReserve));
+        return "";
+      }
+
+      String json;
+      if (!json.reserve(measuredLength + 1)) {
+        Serial.printf(
+            "[DESCRIPTOR] BLE JSON reserve failed (%u bytes)\n",
+            static_cast<unsigned>(measuredLength + 1));
+        return "";
+      }
+
+      DynamicJsonDocument doc(jsonCapacity);
+      if (!populateDocument(module, doc, Profile::Ble)) {
+        return "";
+      }
+
+      serializeJson(doc, json);
+
+      if (json.length() != measuredLength) {
+        Serial.printf(
+            "[DESCRIPTOR] JSON serialization incomplete (%u of %u bytes, profile=ble)\n",
+            static_cast<unsigned>(json.length()),
+            static_cast<unsigned>(measuredLength));
+        return "";
+      }
+
+      return json;
+    }
+
     size_t measuredLength = 0;
 
     {
-      DynamicJsonDocument doc(DescriptorJsonCapacity);
+      DynamicJsonDocument doc(jsonCapacity);
 
-      if (!populateDocument(module, doc, richMetadata)) {
+      if (!populateDocument(module, doc, profile)) {
         return "";
       }
 
@@ -76,14 +213,14 @@ private:
     String json;
     if (!json.reserve(measuredLength + 1)) {
       Serial.printf(
-          "[DESCRIPTOR] JSON string allocation failed (%u bytes, rich=%s)\n",
+          "[DESCRIPTOR] JSON string allocation failed (%u bytes, profile=%s)\n",
           static_cast<unsigned>(measuredLength),
-          richMetadata ? "true" : "false");
+          profileName(profile));
       return "";
     }
 
-    DynamicJsonDocument doc(DescriptorJsonCapacity);
-    if (!populateDocument(module, doc, richMetadata)) {
+    DynamicJsonDocument doc(jsonCapacity);
+    if (!populateDocument(module, doc, profile)) {
       return "";
     }
 
@@ -91,49 +228,62 @@ private:
 
     if (json.length() != measuredLength) {
       Serial.printf(
-          "[DESCRIPTOR] JSON serialization incomplete (%u of %u bytes, rich=%s)\n",
+          "[DESCRIPTOR] JSON serialization incomplete (%u of %u bytes, profile=%s)\n",
           static_cast<unsigned>(json.length()),
           static_cast<unsigned>(measuredLength),
-          richMetadata ? "true" : "false");
+          profileName(profile));
       return "";
     }
 
     return json;
   }
 
-  static bool populateDocument(const ArmorLinkModule& module, DynamicJsonDocument& doc, bool richMetadata) {
+  static bool populateDocument(const ArmorLinkModule& module,
+                               DynamicJsonDocument& doc,
+                               Profile profile) {
     doc.clear();
+
+    const bool isWebSerial = profile == Profile::WebSerial;
 
     doc["module"] = module.name();
     doc["name"] = module.name();
     doc["moduleVersion"] = module.version();
     doc["armorLinkVersion"] = ARMORLINK_VERSION;
-    if (richMetadata && !module.profileName().isEmpty()) {
+    if (isWebSerial && !module.profileName().isEmpty()) {
       doc["profileName"] = module.profileName();
       doc["activeProfileName"] = module.profileName();
       doc["profileNameSource"] = module.profileNameImported()
           ? "imported"
           : "firmware";
     }
-    if (richMetadata && !module.defaultProfileName().isEmpty()) {
+    if (isWebSerial && !module.defaultProfileName().isEmpty()) {
       doc["defaultProfileName"] = module.defaultProfileName();
     }
     doc["supportsPartialConfigGet"] = false;
     doc["supportsConfigSet"] = true;
     doc["moduleType"] = moduleTypeToString(module.type());
-    if (richMetadata && !module.profileTarget().isEmpty()) {
+    if (isWebSerial && !module.profileTarget().isEmpty()) {
       doc["profileTarget"] = module.profileTarget();
     }
     JsonArray sections = doc.createNestedArray("sections");
-    appendSections(module, sections, richMetadata);
+    appendSections(module, sections, profile);
 
     if (doc.overflowed()) {
-      Serial.printf("[DESCRIPTOR] JSON document overflowed (rich=%s)\n",
-                    richMetadata ? "true" : "false");
+      Serial.printf("[DESCRIPTOR] JSON document overflowed (profile=%s)\n",
+                    profileName(profile));
       return false;
     }
 
     return true;
+  }
+
+  static const char* profileName(Profile profile) {
+    switch (profile) {
+      case Profile::WebSerial: return "webserial";
+      case Profile::Ble:
+      default:
+        return "ble";
+    }
   }
 
   static const char* moduleTypeToString(ArmorLinkModuleType type) {
@@ -173,7 +323,8 @@ private:
     }
   }
 
-  static void appendSections(const ArmorLinkModule& module, JsonArray sections, bool richMetadata) {
+  static void appendSections(const ArmorLinkModule& module, JsonArray sections, Profile profile) {
+    const bool isWebSerial = profile == Profile::WebSerial;
     std::vector<String> orderedSections;
     bool hasArmorLinkSection = false;
 
@@ -213,19 +364,25 @@ private:
       }
     }
 
-    if (hasArmorLinkSection) {
+    if (isWebSerial && hasArmorLinkSection) {
       orderedSections.insert(orderedSections.begin(), "ArmorLink");
     }
 
     for (const auto& sectionName : orderedSections) {
       JsonObject section = sections.createNestedObject();
-      section["id"] = normalizeId(sectionName);
+      if (isWebSerial) {
+        section["id"] = normalizeId(sectionName);
+      }
       section["title"] = sectionName;
 
       JsonArray fields = section.createNestedArray("fields");
 
       for (const auto& field : module.config().items()) {
         if (field.section != sectionName) {
+          continue;
+        }
+
+        if (!isWebSerial && field.kind == ArmorLinkFieldKind::Readonly) {
           continue;
         }
 
@@ -238,25 +395,25 @@ private:
           out["editable"] = true;
         }
 
-        if (richMetadata && field.advanced) {
+        if (isWebSerial && field.advanced) {
           out["advanced"] = true;
         }
 
-        if (richMetadata && field.rebootRequired) {
+        if (field.rebootRequired) {
           out["rebootRequired"] = true;
         }
 
-        if (richMetadata && !field.description.isEmpty()) {
+        if (isWebSerial && !field.description.isEmpty()) {
           out["description"] = field.description;
         }
 
-        if (richMetadata &&
+        if (isWebSerial &&
             field.tooltip != nullptr &&
             field.tooltip[0] != '\0') {
           out["tooltip"] = field.tooltip;
         }
 
-        if (richMetadata &&
+        if (isWebSerial &&
             field.visibleWhen.enabled &&
             !field.visibleWhen.key.isEmpty()) {
           JsonObject visibleWhen =
@@ -265,21 +422,31 @@ private:
           visibleWhen["equals"] = field.visibleWhen.value;
         }
 
-        if (richMetadata && !field.unit.isEmpty()) {
+        if (isWebSerial && !field.unit.isEmpty()) {
           out["unit"] = field.unit;
         }
 
-        if (richMetadata && !field.semantic.isEmpty()) {
+        if (isWebSerial && !field.semantic.isEmpty()) {
           out["semantic"] = field.semantic;
         }
 
-        if (richMetadata && !field.semanticGroup.isEmpty()) {
+        if (isWebSerial && !field.semanticGroup.isEmpty()) {
           out["semanticGroup"] = field.semanticGroup;
         }
 
         if (field.editable) {
-          out["entity"] = field.entity.isEmpty() ? "config" : field.entity;
-          out["command"] = field.command.isEmpty() ? field.key : field.command;
+          const String effectiveEntity =
+              field.entity.isEmpty() ? String("config") : field.entity;
+          const String effectiveCommand =
+              field.command.isEmpty() ? field.key : field.command;
+
+          if (isWebSerial || !effectiveEntity.equalsIgnoreCase("config")) {
+            out["entity"] = effectiveEntity;
+          }
+
+          if (isWebSerial || !effectiveCommand.equalsIgnoreCase(field.key)) {
+            out["command"] = effectiveCommand;
+          }
         }
 
         switch (field.kind) {
@@ -314,6 +481,21 @@ private:
             }
             break;
 
+          case ArmorLinkFieldKind::Float:
+            if (field.floatBinding.ptr) {
+              out["value"] = *field.floatBinding.ptr;
+            } else {
+              out["value"] = 0.0f;
+            }
+
+            if (field.hasFloatRange) {
+              out["min"] = field.minFloat;
+              out["max"] = field.maxFloat;
+            }
+
+            out["step"] = field.stepFloat;
+            break;
+
           case ArmorLinkFieldKind::Readonly:
           default:
             out["value"] = field.readonlyBinding.value;
@@ -332,12 +514,13 @@ private:
         }
 
         JsonObject out = actions.createNestedObject();
-        appendAction(action, out, richMetadata);
+        appendAction(action, out, profile);
       }
     }
   }
 
-  static void appendAction(const ArmorLinkActionDef& action, JsonObject out, bool richMetadata) {
+  static void appendAction(const ArmorLinkActionDef& action, JsonObject out, Profile profile) {
+    const bool isWebSerial = profile == Profile::WebSerial;
     out["id"] = action.id;
     out["label"] = action.label;
     out["entity"] = action.entity;
@@ -347,19 +530,19 @@ private:
       out["enabled"] = false;
     }
 
-    if (richMetadata && action.style != ArmorLinkActionStyle::Secondary) {
+    if (isWebSerial && action.style != ArmorLinkActionStyle::Secondary) {
       out["style"] = actionStyleToString(action.style);
     }
 
-    if (richMetadata && action.advanced) {
+    if (isWebSerial && action.advanced) {
       out["advanced"] = true;
     }
 
-    if (richMetadata && !action.description.isEmpty()) {
+    if (isWebSerial && !action.description.isEmpty()) {
       out["description"] = action.description;
     }
 
-    if (richMetadata && !action.confirmText.isEmpty()) {
+    if (!action.confirmText.isEmpty()) {
       out["confirmText"] = action.confirmText;
     }
   }

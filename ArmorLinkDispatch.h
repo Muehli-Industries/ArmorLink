@@ -48,12 +48,50 @@ public:
         case ArmorLinkFieldKind::Int:
           return handleInt(field, static_cast<int>(value));
 
+        case ArmorLinkFieldKind::Float:
+          return handleFloat(field, static_cast<float>(value));
+
         case ArmorLinkFieldKind::Bool:
           return handleBool(field, value != 0);
 
         case ArmorLinkFieldKind::Readonly:
         default:
           return ArmorLinkDispatchResult::NotEditable;
+      }
+    }
+
+    return ArmorLinkDispatchResult::NotFound;
+  }
+
+  ArmorLinkDispatchResult handleConfigSet(
+      const String& entity,
+      const String& command,
+      float value)
+  {
+    if (!_module) return ArmorLinkDispatchResult::NotFound;
+
+    for (auto& field : _module->config().items()) {
+      const bool explicitCommandMatch =
+        field.entity.equalsIgnoreCase(entity) &&
+        field.command.equalsIgnoreCase(command);
+
+      const bool defaultConfigMatch =
+        entity.equalsIgnoreCase("config") &&
+        field.key.equalsIgnoreCase(command);
+
+      const bool keyFallbackMatch =
+        field.key.equalsIgnoreCase(command) ||
+        field.key.equalsIgnoreCase(entity);
+
+      if (!explicitCommandMatch && !defaultConfigMatch && !keyFallbackMatch) continue;
+      if (!field.editable) return ArmorLinkDispatchResult::NotEditable;
+
+      switch (field.kind) {
+        case ArmorLinkFieldKind::Float:
+          return handleFloat(field, value);
+
+        default:
+          return ArmorLinkDispatchResult::InvalidValue;
       }
     }
 
@@ -86,6 +124,20 @@ public:
       switch (field.kind) {
         case ArmorLinkFieldKind::String:
           return handleString(field, value);
+
+        case ArmorLinkFieldKind::Float:
+          return handleFloat(field, value.toFloat());
+
+        case ArmorLinkFieldKind::Int:
+          return handleInt(field, value.toInt());
+
+        case ArmorLinkFieldKind::Bool:
+          return handleBool(
+            field,
+            value.equalsIgnoreCase("true") ||
+            value == "1" ||
+            value.equalsIgnoreCase("yes") ||
+            value.equalsIgnoreCase("on"));
 
         default:
           return ArmorLinkDispatchResult::InvalidValue;
@@ -145,6 +197,22 @@ private:
     return value;
   }
 
+  static float clampFloatValue(const ArmorLinkConfigFieldDef& field, float value) {
+    if (!field.hasFloatRange) {
+      return value;
+    }
+
+    if (value < field.minFloat) {
+      return field.minFloat;
+    }
+
+    if (value > field.maxFloat) {
+      return field.maxFloat;
+    }
+
+    return value;
+  }
+
   ArmorLinkDispatchResult handleInt(ArmorLinkConfigFieldDef& field, int value) {
     if (!field.intBinding.ptr) {
       return ArmorLinkDispatchResult::InvalidValue;
@@ -168,6 +236,34 @@ private:
 
     if (field.onIntChange) {
       field.onIntChange(value);
+    }
+
+    return ArmorLinkDispatchResult::Ok;
+  }
+
+  ArmorLinkDispatchResult handleFloat(ArmorLinkConfigFieldDef& field, float value) {
+    if (!field.floatBinding.ptr) {
+      return ArmorLinkDispatchResult::InvalidValue;
+    }
+
+    const float originalValue = value;
+    value = clampFloatValue(field, value);
+
+    if (value != originalValue) {
+      Serial.printf("[CONFIG] Clamped incoming value for %s from %.3f to %.3f\n",
+                    field.key.c_str(),
+                    originalValue,
+                    value);
+    }
+
+    *field.floatBinding.ptr = value;
+
+    if (!_storage || !_storage->saveField(field)) {
+      return ArmorLinkDispatchResult::StorageError;
+    }
+
+    if (field.onFloatChange) {
+      field.onFloatChange(value);
     }
 
     return ArmorLinkDispatchResult::Ok;

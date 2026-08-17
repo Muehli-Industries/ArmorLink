@@ -166,7 +166,7 @@ public:
   void notifyEventJson(const String& json) {
     if (!_eventTxChar || !_clientConnected) return;
 
-    const uint32_t minGapMs = 15;
+    const uint32_t minGapMs = 35;
     const uint32_t now = millis();
 
     if (_lastEventNotifyMs != 0 && (uint32_t)(now - _lastEventNotifyMs) < minGapMs) {
@@ -174,10 +174,12 @@ public:
       yield();
     }
 
+    Serial.printf("[BLE][TX] event bytes=%u\n", static_cast<unsigned>(json.length()));
     _eventTxChar->setValue((uint8_t*)json.c_str(), json.length());
     _eventTxChar->notify();
 
     _lastEventNotifyMs = millis();
+    delay(5);
     yield();
   }
 
@@ -317,6 +319,287 @@ void processPendingConfigTransfer() {
         delay(chunkDelayMs);
         yield();
     }
+
+    delay(endDelayMs);
+    yield();
+
+    {
+        StaticJsonDocument<224> doc;
+        doc["type"] = "config_end";
+        doc["requestId"] = requestId;
+        doc["target"] = target ? target : "";
+        doc["entity"] = entity ? entity : "";
+        doc["partial"] = partial;
+
+        String out;
+        serializeJson(doc, out);
+        notifyEventJson(out);
+
+        Serial.println("[CONFIG TX] End sent");
+        Serial.println("========== CONFIG TRANSFER END ==========");
+    }
+}
+
+  void notifyConfigBufferChunked(
+    const char* target,
+    const char* entity,
+    uint16_t requestId,
+    const char* json,
+    size_t totalLen,
+    bool partial)
+{
+    Serial.printf(
+        "[CONFIG TX] BLE connected=%s\n",
+        _clientConnected ? "YES" : "NO"
+    );
+
+    const size_t chunkSize = 80;
+    const size_t chunkCount =
+        (totalLen == 0)
+            ? 1
+            : ((totalLen + chunkSize - 1) / chunkSize);
+
+    Serial.println("========== CONFIG TRANSFER ==========");
+    Serial.printf("Request ID  : %u\n", requestId);
+    Serial.printf("Total length: %u bytes\n", static_cast<unsigned>(totalLen));
+    Serial.printf("Chunk size  : %u bytes\n", static_cast<unsigned>(chunkSize));
+    Serial.printf("Chunk count : %u\n", static_cast<unsigned>(chunkCount));
+
+    const uint16_t metaDelayMs = 80;
+    const uint16_t chunkDelayMs = 65;
+    const uint16_t endDelayMs = 120;
+
+    {
+        StaticJsonDocument<256> doc;
+        doc["type"] = "config_meta";
+        doc["requestId"] = requestId;
+        doc["target"] = target ? target : "";
+        doc["entity"] = entity ? entity : "";
+        doc["partial"] = partial;
+        doc["totalLength"] = totalLen;
+        doc["chunkCount"] = chunkCount;
+
+        String out;
+        serializeJson(doc, out);
+        notifyEventJson(out);
+
+        Serial.println("[CONFIG TX] Meta sent");
+
+        delay(metaDelayMs);
+        yield();
+    }
+
+    for (size_t i = 0; i < chunkCount; i++) {
+        const size_t start = i * chunkSize;
+        const size_t len = totalLen == 0
+            ? 0
+            : min(chunkSize, totalLen - start);
+
+        char chunkData[81] = { 0 };
+        if (json != nullptr && len > 0) {
+          memcpy(chunkData, json + start, len);
+          chunkData[len] = '\0';
+        }
+
+        StaticJsonDocument<340> doc;
+        doc["type"] = "config_chunk";
+        doc["requestId"] = requestId;
+        doc["target"] = target ? target : "";
+        doc["entity"] = entity ? entity : "";
+        doc["partial"] = partial;
+        doc["chunkIndex"] = i;
+        doc["chunkCount"] = chunkCount;
+        doc["data"] = chunkData;
+
+        String out;
+        serializeJson(doc, out);
+
+        Serial.printf(
+            "[CONFIG TX] Chunk %u/%u | start=%u | data=%u | packet=%u\n",
+            static_cast<unsigned>(i + 1),
+            static_cast<unsigned>(chunkCount),
+            static_cast<unsigned>(start),
+            static_cast<unsigned>(len),
+            static_cast<unsigned>(out.length())
+        );
+
+        notifyEventJson(out);
+        delay(chunkDelayMs);
+        yield();
+    }
+
+    delay(endDelayMs);
+    yield();
+
+    {
+        StaticJsonDocument<224> doc;
+        doc["type"] = "config_end";
+        doc["requestId"] = requestId;
+        doc["target"] = target ? target : "";
+        doc["entity"] = entity ? entity : "";
+        doc["partial"] = partial;
+
+        String out;
+        serializeJson(doc, out);
+        notifyEventJson(out);
+
+        Serial.println("[CONFIG TX] End sent");
+        Serial.println("========== CONFIG TRANSFER END ==========");
+    }
+}
+
+  template <typename TDocument>
+  void notifyConfigJsonDocumentChunked(
+    const char* target,
+    const char* entity,
+    uint16_t requestId,
+    const TDocument& jsonDoc,
+    bool partial)
+{
+    Serial.printf(
+        "[CONFIG TX] BLE connected=%s\n",
+        _clientConnected ? "YES" : "NO"
+    );
+
+    const size_t totalLen = measureJson(jsonDoc);
+    const size_t chunkSize = 80;
+    const size_t chunkCount =
+        (totalLen == 0)
+            ? 1
+            : ((totalLen + chunkSize - 1) / chunkSize);
+
+    Serial.println("========== CONFIG TRANSFER ==========");
+    Serial.printf("Request ID  : %u\n", requestId);
+    Serial.printf("Total length: %u bytes\n", static_cast<unsigned>(totalLen));
+    Serial.printf("Chunk size  : %u bytes\n", static_cast<unsigned>(chunkSize));
+    Serial.printf("Chunk count : %u\n", static_cast<unsigned>(chunkCount));
+
+    const uint16_t metaDelayMs = 80;
+    const uint16_t chunkDelayMs = 50;
+    const uint16_t endDelayMs = 120;
+
+    {
+        StaticJsonDocument<256> doc;
+        doc["type"] = "config_meta";
+        doc["requestId"] = requestId;
+        doc["target"] = target ? target : "";
+        doc["entity"] = entity ? entity : "";
+        doc["partial"] = partial;
+        doc["totalLength"] = totalLen;
+        doc["chunkCount"] = chunkCount;
+
+        String out;
+        serializeJson(doc, out);
+        notifyEventJson(out);
+
+        Serial.println("[CONFIG TX] Meta sent");
+
+        delay(metaDelayMs);
+        yield();
+    }
+
+    class ConfigChunkPrint : public Print {
+    public:
+      ConfigChunkPrint(ArmorLinkBleRuntime* runtime,
+                       const char* targetName,
+                       const char* entityName,
+                       uint16_t request,
+                       bool isPartial,
+                       size_t chunks,
+                       uint16_t delayMs)
+        : _runtime(runtime),
+          _target(targetName ? targetName : ""),
+          _entity(entityName ? entityName : ""),
+          _requestId(request),
+          _partial(isPartial),
+          _chunkCount(chunks),
+          _chunkDelayMs(delayMs) {}
+
+      size_t write(uint8_t value) override {
+        _buffer[_bufferLen++] = static_cast<char>(value);
+        if (_bufferLen >= ChunkSize) {
+          flushChunk();
+        }
+        return 1;
+      }
+
+      size_t write(const uint8_t* buffer, size_t size) override {
+        for (size_t i = 0; i < size; ++i) {
+          write(buffer[i]);
+        }
+        return size;
+      }
+
+      void finish() {
+        if (_bufferLen > 0 || _chunkIndex == 0) {
+          flushChunk();
+        }
+      }
+
+    private:
+      enum { ChunkSize = 80 };
+
+      ArmorLinkBleRuntime* _runtime = nullptr;
+      const char* _target = "";
+      const char* _entity = "";
+      uint16_t _requestId = 0;
+      bool _partial = false;
+      size_t _chunkCount = 0;
+      uint16_t _chunkDelayMs = 50;
+      char _buffer[ChunkSize + 1] = { 0 };
+      size_t _bufferLen = 0;
+      size_t _chunkIndex = 0;
+
+      void flushChunk() {
+        if (_runtime == nullptr) {
+          _bufferLen = 0;
+          return;
+        }
+
+        _buffer[_bufferLen] = '\0';
+
+        StaticJsonDocument<340> doc;
+        doc["type"] = "config_chunk";
+        doc["requestId"] = _requestId;
+        doc["target"] = _target;
+        doc["entity"] = _entity;
+        doc["partial"] = _partial;
+        doc["chunkIndex"] = _chunkIndex;
+        doc["chunkCount"] = _chunkCount;
+        doc["data"] = _buffer;
+
+        String out;
+        serializeJson(doc, out);
+
+        Serial.printf(
+            "[CONFIG TX] Chunk %u/%u | data=%u | packet=%u\n",
+            static_cast<unsigned>(_chunkIndex + 1),
+            static_cast<unsigned>(_chunkCount),
+            static_cast<unsigned>(_bufferLen),
+            static_cast<unsigned>(out.length())
+        );
+
+        _runtime->notifyEventJson(out);
+        _chunkIndex++;
+        _bufferLen = 0;
+        memset(_buffer, 0, sizeof(_buffer));
+
+        delay(_chunkDelayMs);
+        yield();
+      }
+    };
+
+    ConfigChunkPrint chunkPrint(
+      this,
+      target,
+      entity,
+      requestId,
+      partial,
+      chunkCount,
+      chunkDelayMs);
+
+    serializeJson(jsonDoc, chunkPrint);
+    chunkPrint.finish();
 
     delay(endDelayMs);
     yield();
@@ -625,6 +908,41 @@ inline void bleProcessPendingConfigTransfer() {
 
 inline void bleNotifyConfigJsonChunked(const char* target, const char* entity, uint16_t requestId, const String& json, bool partial) {
   ArmorLinkBLE.notifyConfigJsonChunked(target, entity, requestId, json, partial);
+}
+
+inline void bleNotifyConfigBufferChunked(
+  const char* target,
+  const char* entity,
+  uint16_t requestId,
+  const char* json,
+  size_t totalLen,
+  bool partial)
+{
+  ArmorLinkBLE.notifyConfigBufferChunked(
+    target,
+    entity,
+    requestId,
+    json,
+    totalLen,
+    partial
+  );
+}
+
+template <typename TDocument>
+inline void bleNotifyConfigJsonDocumentChunked(
+  const char* target,
+  const char* entity,
+  uint16_t requestId,
+  const TDocument& jsonDoc,
+  bool partial)
+{
+  ArmorLinkBLE.notifyConfigJsonDocumentChunked(
+    target,
+    entity,
+    requestId,
+    jsonDoc,
+    partial
+  );
 }
 
 inline void setupBleServer(const char* deviceName, ArmorLinkBleCommandHandler* handler) {

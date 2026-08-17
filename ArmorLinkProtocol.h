@@ -6,7 +6,7 @@
 #include <Arduino.h>
 
 #ifndef ARMORLINK_VERSION
-#define ARMORLINK_VERSION "0.4.2-beta.5"
+#define ARMORLINK_VERSION "0.4.2-beta.6"
 #endif
 
 static constexpr uint8_t  ARMORLINK_PROTOCOL_VERSION = 2;
@@ -35,8 +35,11 @@ enum ArmorLinkMessageType : uint8_t {
   AL_MSG_PAIR_ANNOUNCE = 20,
   AL_MSG_PAIR_RESPONSE = 21,
   AL_MSG_PAIR_ACCEPT   = 22,
-  AL_MSG_PAIR_REJECT   = 23
+  AL_MSG_PAIR_REJECT   = 23,
 
+  AL_MSG_DATA_STREAM             = 31,
+  AL_MSG_DATA_STREAM_SUBSCRIBE   = 32,
+  AL_MSG_DATA_STREAM_UNSUBSCRIBE = 33
 };
 
 enum ArmorLinkLogLevel : uint8_t {
