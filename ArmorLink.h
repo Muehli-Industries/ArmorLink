@@ -6394,14 +6394,30 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
           break;
         }
 
-        esp_err_t result = _transport.sendConfigJsonChunkedToTarget(
-          String(msg.source),
-          _module->name().c_str(),
-          msg.requestId,
-          msg.entity,
-          json,
-          false
-        );
+        esp_err_t result = ESP_ERR_NOT_FOUND;
+        uint8_t gatewayMacBytes[6];
+        if (!_isGatewayMode &&
+            strlen(_pairingInfo.gatewayMac) > 0 &&
+            armorLinkParseMacString(String(_pairingInfo.gatewayMac), gatewayMacBytes)) {
+          result = _transport.sendConfigJsonChunkedToMac(
+            gatewayMacBytes,
+            msg.source,
+            _module->name().c_str(),
+            msg.requestId,
+            msg.entity,
+            json,
+            false
+          );
+        } else {
+          result = _transport.sendConfigJsonChunkedToTarget(
+            String(msg.source),
+            _module->name().c_str(),
+            msg.requestId,
+            msg.entity,
+            json,
+            false
+          );
+        }
 
         Serial.printf("[CONFIG] sent descriptor to %s requestId=%u -> %s\n",
                       msg.source,

@@ -346,6 +346,56 @@ esp_err_t ensurePeer(const uint8_t* mac) {
     return sendPacketToTarget(target, end);
   }
 
+  esp_err_t sendConfigJsonChunkedToMac(
+    const uint8_t* mac,
+    const char* target,
+    const char* source,
+    uint16_t requestId,
+    const char* entity,
+    const String& json,
+    bool partial = false
+  ) {
+    const uint16_t totalLen = (uint16_t)json.length();
+    const uint16_t chunkCount = (totalLen == 0) ? 1 : (uint16_t)((totalLen + CONFIG_TRANSFER_CHUNK_DATA_SIZE - 1) / CONFIG_TRANSFER_CHUNK_DATA_SIZE);
+
+    if (chunkCount > ARMORLINK_MAX_CHUNKS) return ESP_ERR_INVALID_SIZE;
+
+    ArmorLinkPacket meta = makeArmorLinkBasePacket(AL_MSG_CONFIG_META, source, target, entity, "config_meta");
+    meta.requestId = requestId;
+    meta.chunkCount = chunkCount;
+    meta.valueInt = totalLen;
+    if (partial) meta.flags |= AL_FLAG_PARTIAL_CFG;
+
+    esp_err_t result = sendPacketToMac(mac, meta);
+    if (result != ESP_OK) return result;
+    delay(CONFIG_META_SETTLE_DELAY_MS);
+
+    for (uint16_t i = 0; i < chunkCount; i++) {
+      const uint16_t start = i * CONFIG_TRANSFER_CHUNK_DATA_SIZE;
+      const uint16_t len = min((uint16_t)CONFIG_TRANSFER_CHUNK_DATA_SIZE, (uint16_t)(totalLen - start));
+
+      ArmorLinkPacket chunk = makeArmorLinkBasePacket(AL_MSG_CONFIG_CHUNK, source, target, entity, "config_chunk");
+      chunk.requestId = requestId;
+      chunk.chunkIndex = i;
+      chunk.chunkCount = chunkCount;
+      chunk.payloadLen = len;
+      if (partial) chunk.flags |= AL_FLAG_PARTIAL_CFG;
+      memcpy(chunk.payload, json.c_str() + start, len);
+
+      result = sendPacketToMac(mac, chunk);
+      if (result != ESP_OK) return result;
+      delay(CONFIG_CHUNK_DELAY_MS);
+    }
+
+    ArmorLinkPacket end = makeArmorLinkBasePacket(AL_MSG_CONFIG_END, source, target, entity, "config_end");
+    end.requestId = requestId;
+    end.chunkCount = chunkCount;
+    end.valueInt = totalLen;
+    if (partial) end.flags |= AL_FLAG_PARTIAL_CFG;
+
+    return sendPacketToMac(mac, end);
+  }
+
 private:
   ArmorLinkPeerRegistry* _registry = nullptr;
   uint8_t _channel = 1;
