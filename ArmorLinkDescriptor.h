@@ -15,11 +15,11 @@ public:
   };
 
   static constexpr size_t WebSerialDescriptorJsonCapacity = 65536;
-  static constexpr size_t BleDescriptorJsonCapacity = 32768;
+  static constexpr size_t BleDescriptorJsonCapacity = 65536;
   static constexpr size_t BleDescriptorBufferSize = 12288;
   static constexpr size_t RichDescriptorJsonCapacity = WebSerialDescriptorJsonCapacity;
   static constexpr size_t CompactDescriptorJsonCapacity = BleDescriptorJsonCapacity;
-  static constexpr size_t CompactDescriptorStringReserve = BleDescriptorJsonCapacity;
+  static constexpr size_t CompactDescriptorStringReserve = 32768;
 
   static String build(const ArmorLinkModule& module) {
     return buildWebSerial(module);

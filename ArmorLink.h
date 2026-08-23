@@ -1185,8 +1185,8 @@ void onBleDisconnected() {
   }
 
   void onEspNowSendStatus(const uint8_t* /*mac_addr*/, esp_now_send_status_t status) {
-    Serial.print("?? Send Status: ");
-    AL_VERBOSE(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+    Serial.printf("[ESPNOW][TX] status=%s\n",
+                  status == ESP_NOW_SEND_SUCCESS ? "success" : "fail");
   }
 
   void processEspNowQueue() {
@@ -1512,17 +1512,27 @@ void onBleDisconnected() {
         return true;
       }
 
+      const String configEntity = strlen(packet.entity) > 0
+        ? String(packet.entity)
+        : String("config");
+
       ArmorLinkPacket out = makeArmorLinkBasePacket(
         AL_MSG_CONFIG_GET,
         localTarget,
         packet.target,
-        packet.entity,
+        configEntity.c_str(),
         "get");
 
       out.requestId = packet.requestId;
       out.flags = packet.flags;
 
       esp_err_t result = _transport.sendPacketToTarget(String(packet.target), out);
+      Serial.printf("[CONFIG][GW] forward get requestId=%u source=%s target=%s entity=%s -> %s\n",
+                    out.requestId,
+                    out.source,
+                    out.target,
+                    out.entity,
+                    esp_err_to_name(result));
       if (result == ESP_OK) {
         notifyAck(
           packet.requestId,
