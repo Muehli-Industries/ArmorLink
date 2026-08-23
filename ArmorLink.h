@@ -1339,14 +1339,17 @@ void onBleDisconnected() {
     return false;
   }
 
-  template<typename TSetLogStreamEnabled>
+  template<
+    typename TSetLogStreamEnabled,
+    typename TNotifyAck,
+    typename TNotifyError>
   bool handlePacket(
     const ArmorLinkPacket& packet,
     const String& payload,
     const char* localTarget,
     TSetLogStreamEnabled setLogStreamEnabled,
-    void (*notifyAck)(uint16_t, const String&, const String&),
-    void (*notifyError)(uint16_t, const String&, const String&))
+    TNotifyAck notifyAck,
+    TNotifyError notifyError)
   {
     if (_module == nullptr) {
       notifyError(packet.requestId, "ArmorLink not initialized", "");
@@ -1724,6 +1727,7 @@ void onBleDisconnected() {
 
     if (_isGatewayMode) {
       bleNotifyEventJson(payload);
+      emitSerialEventJson(payload);
       return ESP_OK;
     }
 
@@ -2056,6 +2060,12 @@ private:
       }
       if (type.equalsIgnoreCase("action_execute")) {
           return handleSerialActionExecute(
+              doc,
+              requestId
+          );
+      }
+      if (type.equalsIgnoreCase("command")) {
+          return handleSerialCommand(
               doc,
               requestId
           );
@@ -2406,23 +2416,11 @@ bool handleSerialActionExecute(
         return true;
     }
 
-    const String requestedTarget =
-        String((const char*)(doc["target"] | ""));
+    String requestedTarget =
+        String((const char*)(doc["target"] | "*"));
 
-    if (!requestedTarget.isEmpty() &&
-        !requestedTarget.equalsIgnoreCase("*") &&
-        !requestedTarget.equalsIgnoreCase(
-            _module->name()
-        )) {
-
-        sendSerialFlasherError(
-            requestId,
-            "target_mismatch",
-            String("Connected module is ") +
-                _module->name()
-        );
-
-        return true;
+    if (requestedTarget.isEmpty()) {
+        requestedTarget = "*";
     }
 
     const String entity =
@@ -2449,6 +2447,36 @@ bool handleSerialActionExecute(
         );
 
         return true;
+    }
+
+    if (!requestedTarget.equalsIgnoreCase("*") &&
+        !requestedTarget.equalsIgnoreCase(_module->name())) {
+        ArmorLinkPacket packet =
+            makeArmorLinkBasePacket(
+                AL_MSG_COMMAND,
+                _module->name().c_str(),
+                requestedTarget.c_str(),
+                entity.c_str(),
+                command.c_str()
+            );
+
+        packet.requestId = requestId;
+        packet.flags = doc["flags"] | 0;
+
+        return handlePacket(
+            packet,
+            "",
+            _module->name().c_str(),
+            [](bool enabled) {
+                setBleLogStreamEnabled(enabled);
+            },
+            [this](uint16_t id, const String& status, const String& message) {
+                sendSerialFlasherAck(id, status, message);
+            },
+            [this](uint16_t id, const String& code, const String& message) {
+                sendSerialFlasherError(id, code, message);
+            }
+        );
     }
 
     ArmorLinkActionDef* action =
@@ -2535,23 +2563,11 @@ bool handleSerialServoMove(
         return true;
     }
 
-    const String requestedTarget =
-        String((const char*)(doc["target"] | ""));
+    String requestedTarget =
+        String((const char*)(doc["target"] | "*"));
 
-    if (!requestedTarget.isEmpty() &&
-        !requestedTarget.equalsIgnoreCase("*") &&
-        !requestedTarget.equalsIgnoreCase(
-            _module->name()
-        )) {
-
-        sendSerialFlasherError(
-            requestId,
-            "target_mismatch",
-            String("Connected module is ") +
-                _module->name()
-        );
-
-        return true;
+    if (requestedTarget.isEmpty()) {
+        requestedTarget = "*";
     }
 
     const String servoId =
@@ -2658,23 +2674,11 @@ bool handleSerialReboot(
         return true;
     }
 
-    const String requestedTarget =
-        String((const char*)(doc["target"] | ""));
+    String requestedTarget =
+        String((const char*)(doc["target"] | "*"));
 
-    if (!requestedTarget.isEmpty() &&
-        !requestedTarget.equalsIgnoreCase("*") &&
-        !requestedTarget.equalsIgnoreCase(
-            _module->name()
-        )) {
-
-        sendSerialFlasherError(
-            requestId,
-            "target_mismatch",
-            String("Connected module is ") +
-                _module->name()
-        );
-
-        return true;
+    if (requestedTarget.isEmpty()) {
+        requestedTarget = "*";
     }
 
     sendSerialFlasherAck(
@@ -2705,23 +2709,11 @@ bool handleSerialConfigSet(
         return true;
     }
 
-    const String requestedTarget =
-        String((const char*)(doc["target"] | ""));
+    String requestedTarget =
+        String((const char*)(doc["target"] | "*"));
 
-    if (!requestedTarget.isEmpty() &&
-        !requestedTarget.equalsIgnoreCase("*") &&
-        !requestedTarget.equalsIgnoreCase(
-            _module->name()
-        )) {
-
-        sendSerialFlasherError(
-            requestId,
-            "target_mismatch",
-            String("Connected module is ") +
-                _module->name()
-        );
-
-        return true;
+    if (requestedTarget.isEmpty()) {
+        requestedTarget = "*";
     }
 
     const String entity =
@@ -2748,6 +2740,60 @@ bool handleSerialConfigSet(
         );
 
         return true;
+    }
+
+    if (!requestedTarget.equalsIgnoreCase("*") &&
+        !requestedTarget.equalsIgnoreCase(_module->name())) {
+        ArmorLinkPacket packet =
+            makeArmorLinkBasePacket(
+                AL_MSG_CONFIG_SET,
+                _module->name().c_str(),
+                requestedTarget.c_str(),
+                entity.c_str(),
+                command.c_str()
+            );
+
+        packet.requestId = requestId;
+        packet.flags = doc["flags"] | 0;
+
+        String payload;
+
+        if (doc["value"].is<const char*>()) {
+            payload = String((const char*)doc["value"]);
+        } else if (doc["value"].is<bool>()) {
+            const bool value = doc["value"].as<bool>();
+            packet.valueInt = value ? 1 : 0;
+            payload = value ? "true" : "false";
+        } else if (doc["value"].is<int>() ||
+                   doc["value"].is<long>() ||
+                   doc["value"].is<unsigned int>() ||
+                   doc["value"].is<unsigned long>()) {
+            packet.valueInt = doc["value"].as<int32_t>();
+            packet.valueFloat = static_cast<float>(packet.valueInt);
+            payload = String(packet.valueInt);
+        } else if (doc["value"].is<float>() ||
+                   doc["value"].is<double>()) {
+            packet.valueFloat = doc["value"].as<float>();
+            packet.valueInt = static_cast<int32_t>(packet.valueFloat);
+            payload = String(packet.valueFloat);
+        }
+
+        setArmorLinkPacketPayload(packet, payload);
+
+        return handlePacket(
+            packet,
+            payload,
+            _module->name().c_str(),
+            [](bool enabled) {
+                setBleLogStreamEnabled(enabled);
+            },
+            [this](uint16_t id, const String& status, const String& message) {
+                sendSerialFlasherAck(id, status, message);
+            },
+            [this](uint16_t id, const String& code, const String& message) {
+                sendSerialFlasherError(id, code, message);
+            }
+        );
     }
 
     ArmorLinkConfigFieldDef* field =
@@ -3197,6 +3243,94 @@ void sendSerialFlasherAck(
     Serial.println(json);
 }
 
+bool handleSerialCommand(
+    JsonDocument& doc,
+    uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+        return true;
+    }
+
+    String target =
+        String((const char*)(doc["target"] | "*"));
+
+    if (target.isEmpty()) {
+        target = "*";
+    }
+
+    const String entity =
+        String((const char*)(doc["entity"] | ""));
+
+    const String command =
+        String((const char*)(doc["command"] | ""));
+
+    if (entity.isEmpty() || command.isEmpty()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_command",
+            "Command entity or command is missing"
+        );
+        return true;
+    }
+
+    ArmorLinkPacket packet =
+        makeArmorLinkBasePacket(
+            AL_MSG_COMMAND,
+            _module->name().c_str(),
+            target.c_str(),
+            entity.c_str(),
+            command.c_str()
+        );
+
+    packet.requestId = requestId;
+    packet.flags = doc["flags"] | 0;
+    packet.valueInt = doc["valueInt"] | 0;
+    packet.valueFloat = doc["valueFloat"] | 0.0f;
+    packet.batteryVoltage = doc["batteryVoltage"] | 0.0f;
+
+    String payload;
+
+    if (doc["payload"].is<const char*>()) {
+        payload = String((const char*)doc["payload"]);
+    } else if (doc["value"].is<bool>()) {
+        const bool value = doc["value"].as<bool>();
+        packet.valueInt = value ? 1 : 0;
+        payload = value ? "true" : "false";
+    } else if (doc["value"].is<int>()) {
+        packet.valueInt = doc["value"].as<int>();
+        packet.valueFloat = static_cast<float>(packet.valueInt);
+        payload = String(packet.valueInt);
+    } else if (doc["value"].is<float>()) {
+        packet.valueFloat = doc["value"].as<float>();
+        packet.valueInt = static_cast<int32_t>(packet.valueFloat);
+        payload = String(packet.valueFloat);
+    } else if (doc["value"].is<const char*>()) {
+        payload = String((const char*)doc["value"]);
+    }
+
+    setArmorLinkPacketPayload(packet, payload);
+
+    return handlePacket(
+        packet,
+        payload,
+        _module->name().c_str(),
+        [](bool enabled) {
+            setBleLogStreamEnabled(enabled);
+        },
+        [this](uint16_t id, const String& status, const String& message) {
+            sendSerialFlasherAck(id, status, message);
+        },
+        [this](uint16_t id, const String& code, const String& message) {
+            sendSerialFlasherError(id, code, message);
+        }
+    );
+}
+
 bool handleSerialConfigGet(
     JsonDocument& doc,
     uint16_t requestId
@@ -3210,40 +3344,48 @@ bool handleSerialConfigGet(
         return true;
     }
 
-    const String requestedTarget =
-        String((const char*)(doc["target"] | ""));
+    String requestedTarget =
+        String((const char*)(doc["target"] | "*"));
 
-    if (!requestedTarget.isEmpty() &&
-        !requestedTarget.equalsIgnoreCase("*") &&
-        !requestedTarget.equalsIgnoreCase(
-            _module->name()
-        )) {
+    if (requestedTarget.isEmpty()) {
+        requestedTarget = "*";
+    }
 
-        sendSerialFlasherError(
+    if (requestedTarget.equalsIgnoreCase("*") ||
+        requestedTarget.equalsIgnoreCase(_module->name())) {
+        sendSerialConfigDescriptor(
             requestId,
-            "target_mismatch",
-            String("Connected module is ") +
-                _module->name()
+            *_module
         );
 
         return true;
     }
 
-    if (_module == nullptr) {
-        sendSerialFlasherError(
-            requestId,
-            "descriptor_empty",
-            "Config descriptor is empty"
+    ArmorLinkPacket packet =
+        makeArmorLinkBasePacket(
+            AL_MSG_CONFIG_GET,
+            _module->name().c_str(),
+            requestedTarget.c_str(),
+            "config",
+            "get"
         );
-        return true;
-    }
 
-    sendSerialConfigDescriptor(
-        requestId,
-        *_module
+    packet.requestId = requestId;
+
+    return handlePacket(
+        packet,
+        "",
+        _module->name().c_str(),
+        [](bool enabled) {
+            setBleLogStreamEnabled(enabled);
+        },
+        [this](uint16_t id, const String& status, const String& message) {
+            sendSerialFlasherAck(id, status, message);
+        },
+        [this](uint16_t id, const String& code, const String& message) {
+            sendSerialFlasherError(id, code, message);
+        }
     );
-
-    return true;
 }
 
 class ArmorLinkSerialDescriptorPrint : public Print {
@@ -5233,13 +5375,23 @@ void emitModulePresenceSnapshot() {
     doc["pairedModuleCount"] = static_cast<uint32_t>(_pairedModuleCount);
 
     JsonArray modules = doc.createNestedArray("modules");
+    const uint32_t now = millis();
     for (size_t i = 0; i < _pairedModuleCount && i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
       JsonObject mod = modules.createNestedObject();
+      const bool online = _presenceStates[i].occupied && _presenceStates[i].isOnline;
+      const uint32_t silentMs =
+        _presenceStates[i].lastSeenMs > 0
+          ? now - _presenceStates[i].lastSeenMs
+          : 0;
+
       mod["name"] = _pairedModules[i].name;
       mod["type"] = _pairedModules[i].type;
       mod["mac"] = _pairedModules[i].mac;
       mod["moduleVersion"] = strlen(_pairedModules[i].moduleVersion) > 0 ? _pairedModules[i].moduleVersion : "1.0";
       mod["armorLinkVersion"] = _pairedModules[i].armorLinkVersion;
+      mod["online"] = online;
+      mod["status"] = online ? "online" : "offline";
+      mod["silentMs"] = silentMs;
     }
 
     String out;
@@ -5249,6 +5401,7 @@ void emitModulePresenceSnapshot() {
                   static_cast<unsigned>(out.length()),
                   static_cast<unsigned>(_pairedModuleCount));
     bleNotifyEventJson(out);
+    emitSerialEventJson(out);
   }
 
   void emitModulePresenceEvent(const ArmorLinkStoredPairedModule& module, bool isOnline, uint32_t silentMs) {
@@ -5274,6 +5427,7 @@ void emitModulePresenceSnapshot() {
 
     AL_VERBOSE("[PRESENCE] JSON length=%u\n", static_cast<unsigned>(out.length()));
     bleNotifyEventJson(out);
+    emitSerialEventJson(out);
   }
   
 
@@ -6144,6 +6298,26 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
     }
   }
 
+  void emitSerialEventJson(const String& json) {
+    if (json.isEmpty() ||
+        _localConfigTransferPending ||
+        _localConfigTransferActive) {
+      return;
+    }
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+  }
+
+  void emitSerialTransportJson(const String& json) {
+    if (json.isEmpty()) {
+      return;
+    }
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+  }
+
 int findPairedModuleIndexByName(const char* name) const {
   if (name == nullptr || strlen(name) == 0) return -1;
 
@@ -6368,6 +6542,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         String out;
         serializeJson(doc, out);        
         bleNotifyEventJson(out);
+        emitSerialEventJson(out);
         break;
       }
       case AL_MSG_DATA_STREAM_SUBSCRIBE: {
@@ -6494,6 +6669,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         String out;
         serializeJson(doc, out);
         bleNotifyEventJson(out);
+        emitSerialTransportJson(out);
         break;
       }
 
@@ -6531,6 +6707,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         String out;
         serializeJson(doc, out);
         bleNotifyEventJson(out);
+        emitSerialTransportJson(out);
         break;
       }
 
@@ -6546,6 +6723,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         String out;
         serializeJson(doc, out);
         bleNotifyEventJson(out);
+        emitSerialTransportJson(out);
         break;
       }
 
@@ -6560,6 +6738,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         String out;
         serializeJson(doc, out);
         bleNotifyEventJson(out);
+        emitSerialTransportJson(out);
         break;
       }
 
@@ -6573,6 +6752,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         String out;
         serializeJson(doc, out);
         bleNotifyEventJson(out);
+        emitSerialTransportJson(out);
         break;
       }
 
@@ -6760,6 +6940,7 @@ inline esp_err_t ArmorLinkTelemetryBuilder::send() {
 
   if (_rt->_isGatewayMode) {
     bleNotifyEventJson(payload);
+    _rt->emitSerialEventJson(payload);
     return ESP_OK;
   }
 

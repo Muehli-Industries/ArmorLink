@@ -44,18 +44,22 @@ public:
   }
 
   static bool writeWebSerial(const ArmorLinkModule& module, Print& out, size_t* length = nullptr) {
-    DynamicJsonDocument doc(WebSerialDescriptorJsonCapacity);
-
-    if (!populateDocument(module, doc, Profile::WebSerial)) {
+    ArmorLinkDescriptorCountingPrint counter;
+    if (!writeDocumentStreaming(module, counter, Profile::WebSerial)) {
       return false;
     }
 
-    const size_t measuredLength = measureJson(doc);
+    const size_t measuredLength = counter.length();
     if (length != nullptr) {
       *length = measuredLength;
     }
 
-    const size_t writtenLength = serializeJson(doc, out);
+    ArmorLinkDescriptorCountingPrint countedOut(&out);
+    if (!writeDocumentStreaming(module, countedOut, Profile::WebSerial)) {
+      return false;
+    }
+
+    const size_t writtenLength = countedOut.length();
     if (writtenLength != measuredLength) {
       Serial.printf(
           "[DESCRIPTOR] JSON stream incomplete (%u of %u bytes)\n",
@@ -72,14 +76,14 @@ public:
   }
 
   static bool measureWebSerial(const ArmorLinkModule& module, size_t& length) {
-    DynamicJsonDocument doc(WebSerialDescriptorJsonCapacity);
+    ArmorLinkDescriptorCountingPrint counter;
 
-    if (!populateDocument(module, doc, Profile::WebSerial)) {
+    if (!writeDocumentStreaming(module, counter, Profile::WebSerial)) {
       length = 0;
       return false;
     }
 
-    length = measureJson(doc);
+    length = counter.length();
     return true;
   }
 
@@ -149,6 +153,488 @@ public:
   }
 
 private:
+  class ArmorLinkDescriptorCountingPrint : public Print {
+  public:
+    explicit ArmorLinkDescriptorCountingPrint(Print* out = nullptr)
+        : _out(out) {}
+
+    size_t write(uint8_t value) override {
+      if (_out != nullptr) {
+        _out->write(value);
+      }
+
+      _length++;
+      return 1;
+    }
+
+    size_t write(const uint8_t* buffer, size_t size) override {
+      if (_out != nullptr) {
+        _out->write(buffer, size);
+      }
+
+      _length += size;
+      return size;
+    }
+
+    size_t length() const {
+      return _length;
+    }
+
+  private:
+    Print* _out;
+    size_t _length = 0;
+  };
+
+  static bool writeDocumentStreaming(const ArmorLinkModule& module,
+                                     Print& out,
+                                     Profile profile) {
+    const bool isWebSerial = profile == Profile::WebSerial;
+
+    out.print('{');
+    bool first = true;
+
+    writeStringProperty(out, first, "module", module.name());
+    writeStringProperty(out, first, "name", module.name());
+    writeStringProperty(out, first, "moduleVersion", module.version());
+    writeStringProperty(out, first, "armorLinkVersion", ARMORLINK_VERSION);
+
+    if (isWebSerial && !module.profileName().isEmpty()) {
+      writeStringProperty(out, first, "profileName", module.profileName());
+      writeStringProperty(out, first, "activeProfileName", module.profileName());
+      writeStringProperty(
+          out,
+          first,
+          "profileNameSource",
+          module.profileNameImported() ? "imported" : "firmware");
+    }
+
+    if (isWebSerial && !module.defaultProfileName().isEmpty()) {
+      writeStringProperty(out, first, "defaultProfileName", module.defaultProfileName());
+    }
+
+    writeBoolProperty(out, first, "supportsPartialConfigGet", false);
+    writeBoolProperty(out, first, "supportsConfigSet", true);
+    writeStringProperty(out, first, "moduleType", moduleTypeToString(module.type()));
+
+    if (isWebSerial && !module.profileTarget().isEmpty()) {
+      writeStringProperty(out, first, "profileTarget", module.profileTarget());
+    }
+
+    writePropertyName(out, first, "sections");
+    out.print('[');
+    writeSectionsStreaming(module, out, profile);
+    out.print(']');
+
+    out.print('}');
+    return true;
+  }
+
+  static void writeSectionsStreaming(const ArmorLinkModule& module,
+                                     Print& out,
+                                     Profile profile) {
+    const bool isWebSerial = profile == Profile::WebSerial;
+    std::vector<String> orderedSections;
+    bool hasArmorLinkSection = false;
+
+    for (const auto& field : module.config().items()) {
+      if (field.section.equalsIgnoreCase("ArmorLink")) {
+        hasArmorLinkSection = true;
+        continue;
+      }
+
+      bool found = false;
+      for (const auto& existing : orderedSections) {
+        if (existing == field.section) {
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        orderedSections.push_back(field.section);
+      }
+    }
+
+    for (const auto& action : module.actions().items()) {
+      const String actionSection =
+          action.section.isEmpty() ? String("General") : action.section;
+
+      bool found = false;
+      for (const auto& existing : orderedSections) {
+        if (normalizeId(existing) == normalizeId(actionSection)) {
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        orderedSections.push_back(actionSection);
+      }
+    }
+
+    if (isWebSerial && hasArmorLinkSection) {
+      orderedSections.insert(orderedSections.begin(), "ArmorLink");
+    }
+
+    bool firstSection = true;
+
+    for (const auto& sectionName : orderedSections) {
+      if (!firstSection) {
+        out.print(',');
+      }
+      firstSection = false;
+
+      writeSectionStreaming(module, out, profile, sectionName);
+    }
+  }
+
+  static void writeSectionStreaming(const ArmorLinkModule& module,
+                                    Print& out,
+                                    Profile profile,
+                                    const String& sectionName) {
+    const bool isWebSerial = profile == Profile::WebSerial;
+
+    out.print('{');
+    bool first = true;
+
+    if (isWebSerial) {
+      writeStringProperty(out, first, "id", normalizeId(sectionName));
+    }
+
+    writeStringProperty(out, first, "title", sectionName);
+
+    writePropertyName(out, first, "fields");
+    out.print('[');
+    writeFieldsStreaming(module, out, profile, sectionName);
+    out.print(']');
+
+    writePropertyName(out, first, "actions");
+    out.print('[');
+    writeActionsStreaming(module, out, profile, sectionName);
+    out.print(']');
+
+    out.print('}');
+  }
+
+  static void writeFieldsStreaming(const ArmorLinkModule& module,
+                                   Print& out,
+                                   Profile profile,
+                                   const String& sectionName) {
+    const bool isWebSerial = profile == Profile::WebSerial;
+    bool firstField = true;
+
+    for (const auto& field : module.config().items()) {
+      if (field.section != sectionName) {
+        continue;
+      }
+
+      if (!isWebSerial && field.kind == ArmorLinkFieldKind::Readonly) {
+        continue;
+      }
+
+      if (!firstField) {
+        out.print(',');
+      }
+      firstField = false;
+
+      writeFieldStreaming(field, out, profile);
+    }
+  }
+
+  static void writeFieldStreaming(const ArmorLinkConfigFieldDef& field,
+                                  Print& out,
+                                  Profile profile) {
+    const bool isWebSerial = profile == Profile::WebSerial;
+
+    out.print('{');
+    bool first = true;
+
+    writeStringProperty(out, first, "key", field.key);
+    writeStringProperty(out, first, "label", field.label);
+    writeStringProperty(out, first, "kind", fieldKindToString(field.kind));
+
+    if (field.editable) {
+      writeBoolProperty(out, first, "editable", true);
+    }
+
+    if (isWebSerial && field.advanced) {
+      writeBoolProperty(out, first, "advanced", true);
+    }
+
+    if (field.rebootRequired) {
+      writeBoolProperty(out, first, "rebootRequired", true);
+    }
+
+    if (isWebSerial && !field.description.isEmpty()) {
+      writeStringProperty(out, first, "description", field.description);
+    }
+
+    if (isWebSerial &&
+        field.tooltip != nullptr &&
+        field.tooltip[0] != '\0') {
+      writeStringProperty(out, first, "tooltip", field.tooltip);
+    }
+
+    if (isWebSerial &&
+        field.visibleWhen.enabled &&
+        !field.visibleWhen.key.isEmpty()) {
+      writePropertyName(out, first, "visibleWhen");
+      out.print('{');
+      bool visibleFirst = true;
+      writeStringProperty(out, visibleFirst, "key", field.visibleWhen.key);
+      writeStringProperty(out, visibleFirst, "equals", field.visibleWhen.value);
+      out.print('}');
+    }
+
+    if (isWebSerial && !field.unit.isEmpty()) {
+      writeStringProperty(out, first, "unit", field.unit);
+    }
+
+    if (isWebSerial && !field.semantic.isEmpty()) {
+      writeStringProperty(out, first, "semantic", field.semantic);
+    }
+
+    if (isWebSerial && !field.semanticGroup.isEmpty()) {
+      writeStringProperty(out, first, "semanticGroup", field.semanticGroup);
+    }
+
+    if (field.editable) {
+      const String effectiveEntity =
+          field.entity.isEmpty() ? String("config") : field.entity;
+      const String effectiveCommand =
+          field.command.isEmpty() ? field.key : field.command;
+
+      if (isWebSerial || !effectiveEntity.equalsIgnoreCase("config")) {
+        writeStringProperty(out, first, "entity", effectiveEntity);
+      }
+
+      if (isWebSerial || !effectiveCommand.equalsIgnoreCase(field.key)) {
+        writeStringProperty(out, first, "command", effectiveCommand);
+      }
+    }
+
+    writeFieldValueAndRange(field, out, first);
+
+    out.print('}');
+  }
+
+  static void writeFieldValueAndRange(const ArmorLinkConfigFieldDef& field,
+                                      Print& out,
+                                      bool& first) {
+    switch (field.kind) {
+      case ArmorLinkFieldKind::Int:
+        writeIntProperty(
+            out,
+            first,
+            "value",
+            field.intBinding.ptr ? *field.intBinding.ptr : 0);
+
+        if (field.hasIntRange) {
+          writeIntProperty(out, first, "min", field.minInt);
+          writeIntProperty(out, first, "max", field.maxInt);
+        }
+
+        writeIntProperty(out, first, "step", field.stepInt);
+        break;
+
+      case ArmorLinkFieldKind::Bool:
+        writeBoolProperty(
+            out,
+            first,
+            "value",
+            field.boolBinding.ptr ? *field.boolBinding.ptr : false);
+        break;
+
+      case ArmorLinkFieldKind::String:
+        writeStringProperty(
+            out,
+            first,
+            "value",
+            field.stringBinding.ptr ? *field.stringBinding.ptr : String(""));
+        break;
+
+      case ArmorLinkFieldKind::Float:
+        writeFloatProperty(
+            out,
+            first,
+            "value",
+            field.floatBinding.ptr ? *field.floatBinding.ptr : 0.0f);
+
+        if (field.hasFloatRange) {
+          writeFloatProperty(out, first, "min", field.minFloat);
+          writeFloatProperty(out, first, "max", field.maxFloat);
+        }
+
+        writeFloatProperty(out, first, "step", field.stepFloat);
+        break;
+
+      case ArmorLinkFieldKind::Readonly:
+      default:
+        writeStringProperty(out, first, "value", field.readonlyBinding.value);
+        break;
+    }
+  }
+
+  static void writeActionsStreaming(const ArmorLinkModule& module,
+                                    Print& out,
+                                    Profile profile,
+                                    const String& sectionName) {
+    bool firstAction = true;
+
+    for (const auto& action : module.actions().items()) {
+      const String actionSection =
+          action.section.isEmpty() ? String("General") : action.section;
+
+      if (normalizeId(actionSection) != normalizeId(sectionName)) {
+        continue;
+      }
+
+      if (!firstAction) {
+        out.print(',');
+      }
+      firstAction = false;
+
+      out.print('{');
+      appendActionStreaming(action, out, profile);
+      out.print('}');
+    }
+  }
+
+  static void appendActionStreaming(const ArmorLinkActionDef& action,
+                                    Print& out,
+                                    Profile profile) {
+    const bool isWebSerial = profile == Profile::WebSerial;
+    bool first = true;
+
+    writeStringProperty(out, first, "id", action.id);
+    writeStringProperty(out, first, "label", action.label);
+    writeStringProperty(out, first, "entity", action.entity);
+    writeStringProperty(out, first, "command", action.command);
+
+    if (!action.enabled) {
+      writeBoolProperty(out, first, "enabled", false);
+    }
+
+    if (isWebSerial && action.style != ArmorLinkActionStyle::Secondary) {
+      writeStringProperty(out, first, "style", actionStyleToString(action.style));
+    }
+
+    if (isWebSerial && action.advanced) {
+      writeBoolProperty(out, first, "advanced", true);
+    }
+
+    if (isWebSerial && !action.description.isEmpty()) {
+      writeStringProperty(out, first, "description", action.description);
+    }
+
+    if (!action.confirmText.isEmpty()) {
+      writeStringProperty(out, first, "confirmText", action.confirmText);
+    }
+  }
+
+  static void writePropertyName(Print& out,
+                                bool& first,
+                                const char* name) {
+    if (!first) {
+      out.print(',');
+    }
+    first = false;
+    writeQuoted(out, name);
+    out.print(':');
+  }
+
+  static void writeStringProperty(Print& out,
+                                  bool& first,
+                                  const char* name,
+                                  const String& value) {
+    writePropertyName(out, first, name);
+    writeQuoted(out, value);
+  }
+
+  static void writeStringProperty(Print& out,
+                                  bool& first,
+                                  const char* name,
+                                  const char* value) {
+    writePropertyName(out, first, name);
+    writeQuoted(out, value == nullptr ? "" : value);
+  }
+
+  static void writeBoolProperty(Print& out,
+                                bool& first,
+                                const char* name,
+                                bool value) {
+    writePropertyName(out, first, name);
+    out.print(value ? "true" : "false");
+  }
+
+  static void writeIntProperty(Print& out,
+                               bool& first,
+                               const char* name,
+                               int value) {
+    writePropertyName(out, first, name);
+    out.print(value);
+  }
+
+  static void writeFloatProperty(Print& out,
+                                 bool& first,
+                                 const char* name,
+                                 float value) {
+    writePropertyName(out, first, name);
+    out.print(value, 3);
+  }
+
+  static void writeQuoted(Print& out, const String& value) {
+    writeQuoted(out, value.c_str());
+  }
+
+  static void writeQuoted(Print& out, const char* value) {
+    out.print('"');
+
+    if (value != nullptr) {
+      for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+        const char c = *cursor;
+
+        switch (c) {
+          case '"':
+            out.print("\\\"");
+            break;
+          case '\\':
+            out.print("\\\\");
+            break;
+          case '\b':
+            out.print("\\b");
+            break;
+          case '\f':
+            out.print("\\f");
+            break;
+          case '\n':
+            out.print("\\n");
+            break;
+          case '\r':
+            out.print("\\r");
+            break;
+          case '\t':
+            out.print("\\t");
+            break;
+          default:
+            if (static_cast<uint8_t>(c) < 0x20) {
+              out.print("\\u00");
+              const uint8_t valueByte = static_cast<uint8_t>(c);
+              if (valueByte < 0x10) {
+                out.print('0');
+              }
+              out.print(valueByte, HEX);
+            } else {
+              out.print(c);
+            }
+            break;
+        }
+      }
+    }
+
+    out.print('"');
+  }
+
   static String buildWithProfile(const ArmorLinkModule& module,
                                  Profile profile,
                                  size_t jsonCapacity) {
