@@ -305,6 +305,7 @@ public:
 
     _storage.begin(resolveNamespace(module, options));
     _storage.load(module);
+    _storage.loadActionDefinitions(module);
     applySystemConfig();
 
     if(_options.enableBle){
@@ -380,6 +381,10 @@ public:
     initStartupHelloState();
 
     _dispatch.begin(&module, &_storage);
+    _module->actionBuilder().onRemoteAction(
+      [this](const String& target, const String& entity, const String& command) {
+        return sendActionBuilderCommandToTarget(target, entity, command);
+      });
 
     _transport.setManagedHandlers(
       &ArmorLinkRuntime::handleManagedReceiveStatic,
@@ -410,6 +415,9 @@ public:
     processLocalConfigTransfer();
     bleProcessPendingConfigTransfer();
     processEspNowQueue();
+    if (_module != nullptr) {
+      _module->actionBuilder().tick(_module->actions());
+    }
     remotePairingQuietTick();
     pairingQuietStopRepeatTick();
     pairingTick();
@@ -1654,6 +1662,27 @@ void onBleDisconnected() {
     if (packet.msgType == AL_MSG_COMMAND &&
         (equalsIgnoreCase(packet.target, localTarget) || equalsIgnoreCase(packet.target, "*"))) {
 
+      if (_module != nullptr) {
+        const String actionEntity = String(packet.entity);
+        const String actionCommand = String(packet.command);
+        const bool hasActionDefinition =
+            _module->actionBuilder().findDefinition(actionEntity, actionCommand) != nullptr;
+
+        if (hasActionDefinition && _module->actionBuilder().isRunning()) {
+          if (!equalsIgnoreCase(packet.target, "*")) {
+            notifyError(packet.requestId, "Action sequence is already running", "");
+          }
+          return true;
+        }
+
+        if (_module->actionBuilder().execute(actionEntity, actionCommand, _module->actions())) {
+          if (!equalsIgnoreCase(packet.target, "*")) {
+            notifyAck(packet.requestId, "ok", "Action sequence started");
+          }
+          return true;
+        }
+      }
+
       auto actionResult = _dispatch.handleAction(String(packet.entity), String(packet.command));
       if (actionResult == ArmorLinkDispatchResult::Ok) {
         if (!equalsIgnoreCase(packet.target, "*")) {
@@ -2020,7 +2049,7 @@ private:
           return true;
       }
 
-      StaticJsonDocument<512> doc;
+      StaticJsonDocument<2048> doc;
 
       const DeserializationError error =
           deserializeJson(doc, payload);
@@ -2060,6 +2089,18 @@ private:
       }
       if (type.equalsIgnoreCase("action_execute")) {
           return handleSerialActionExecute(
+              doc,
+              requestId
+          );
+      }
+      if (type.equalsIgnoreCase("action_definition_set")) {
+          return handleSerialActionDefinitionSet(
+              doc,
+              requestId
+          );
+      }
+      if (type.equalsIgnoreCase("action_component_set")) {
+          return handleSerialActionComponentSet(
               doc,
               requestId
           );
@@ -2402,6 +2443,397 @@ void sendSerialServoMoveAck(
     Serial.println(json);
 }
 
+void sendSerialActionDefinitionAck(
+    uint16_t requestId,
+    const ArmorLinkActionDefinition& definition
+) {
+    StaticJsonDocument<384> doc;
+
+    doc["type"] = "ack";
+    doc["requestId"] = requestId;
+    doc["status"] = "ok";
+    doc["operation"] = "action_definition_set";
+    doc["entity"] = definition.entity;
+    doc["command"] = definition.command;
+    doc["opCount"] = definition.ops.size();
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+}
+
+void sendSerialActionComponentAck(
+    uint16_t requestId,
+    const ArmorLinkActionComponentDef& component
+) {
+    StaticJsonDocument<384> doc;
+
+    doc["type"] = "ack";
+    doc["requestId"] = requestId;
+    doc["status"] = "ok";
+    doc["operation"] = "action_component_set";
+    doc["id"] = component.id;
+    doc["label"] = component.label;
+    doc["section"] = component.section;
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+}
+
+bool handleSerialActionComponentSet(
+    JsonDocument& doc,
+    uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+
+        return true;
+    }
+
+    JsonObject componentJson = doc["component"].as<JsonObject>();
+    if (componentJson.isNull()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_component",
+            "Action component is missing"
+        );
+
+        return true;
+    }
+
+    const String id = String((const char*)(componentJson["id"] | ""));
+    const String kindName = String((const char*)(componentJson["kind"] | ""));
+    const String label = String((const char*)(componentJson["label"] | ""));
+    const String section = String((const char*)(componentJson["section"] | ""));
+    bool defaultValue = componentJson["defaultValue"] | false;
+    if (!componentJson["d"].isNull()) {
+        defaultValue = componentJson["d"] | false;
+    }
+    const ArmorLinkActionComponentKind kind =
+        actionComponentKindFromString(kindName);
+
+    if (id.isEmpty() ||
+        kind != ArmorLinkActionComponentKind::State) {
+        sendSerialFlasherError(
+            requestId,
+            "invalid_component",
+            "Action component id or kind is invalid"
+        );
+
+        return true;
+    }
+
+    ArmorLinkActionComponentDef& component =
+        _module->actionBuilder().upsertCustomComponent(
+            id,
+            kind,
+            label,
+            section,
+            defaultValue);
+
+    if (!_storage.saveActionComponents(_module->actionBuilder())) {
+        sendSerialFlasherError(
+            requestId,
+            "storage_error",
+            "Action component could not be saved"
+        );
+
+        return true;
+    }
+
+    sendSerialActionComponentAck(requestId, component);
+    return true;
+}
+
+bool handleSerialActionDefinitionSet(
+    JsonDocument& doc,
+    uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+
+        return true;
+    }
+
+    JsonObject definitionJson = doc["definition"].as<JsonObject>();
+    if (definitionJson.isNull()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_definition",
+            "Action definition is missing"
+        );
+
+        return true;
+    }
+
+    ArmorLinkActionDefinition definition;
+    definition.entity = String(
+        (const char*)(definitionJson["entity"] | ""));
+    if (definition.entity.isEmpty()) {
+        definition.entity = String(
+            (const char*)(definitionJson["e"] | ""));
+    }
+
+    definition.command = String(
+        (const char*)(definitionJson["command"] | ""));
+    if (definition.command.isEmpty()) {
+        definition.command = String(
+            (const char*)(definitionJson["c"] | ""));
+    }
+    definition.label = String(
+        (const char*)(definitionJson["label"] | ""));
+    if (definition.label.isEmpty()) {
+        definition.label = String(
+            (const char*)(definitionJson["l"] | ""));
+    }
+    definition.section = String(
+        (const char*)(definitionJson["section"] | ""));
+    if (definition.section.isEmpty()) {
+        definition.section = String(
+            (const char*)(definitionJson["s"] | ""));
+    }
+
+    if (definition.entity.isEmpty() || definition.command.isEmpty()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_action",
+            "Action entity or command is missing"
+        );
+
+        return true;
+    }
+
+    const bool isCustomAction =
+        findAction(definition.entity, definition.command) == nullptr;
+
+    if (isCustomAction &&
+        _module->actionBuilder().findCustomAction(definition.entity, definition.command) == nullptr) {
+        _module->actionBuilder().upsertCustomAction(
+            definition.entity,
+            definition.command,
+            definition.label,
+            definition.section);
+    }
+
+    JsonArray ops = definitionJson["operations"].as<JsonArray>();
+    if (ops.isNull()) {
+        ops = definitionJson["o"].as<JsonArray>();
+    }
+    if (ops.isNull() || ops.size() == 0 || ops.size() > 63) {
+        sendSerialFlasherError(
+            requestId,
+            "invalid_operations",
+            "Action definition must contain 1 to 63 operations"
+        );
+
+        return true;
+    }
+
+    definition.ops.reserve(ops.size());
+
+    for (JsonObject opJson : ops) {
+        ArmorLinkActionOp op;
+        String opName = String((const char*)(opJson["op"] | ""));
+        if (opName.isEmpty()) {
+            opName = String((const char*)(opJson["o"] | ""));
+        }
+
+        if (opName.equalsIgnoreCase("wait")) {
+            op.code = ArmorLinkActionOpCode::Wait;
+            op.componentIndex = 0xFF;
+            int durationMs = opJson["durationMs"] | 0;
+            if (durationMs <= 0) {
+                durationMs = opJson["ms"] | 1;
+            }
+            op.argument = static_cast<uint16_t>(
+                constrain(durationMs, 1, 60000));
+        } else if (opName.equalsIgnoreCase("repeat_previous")) {
+            int repeatCount = opJson["count"] | 0;
+            if (repeatCount <= 0) {
+                repeatCount = opJson["n"] | 1;
+            }
+            op.code = ArmorLinkActionOpCode::RepeatPrevious;
+            op.componentIndex = 0xFF;
+            op.argument = static_cast<uint16_t>(
+                constrain(repeatCount, 1, 20));
+        } else if (opName.equalsIgnoreCase("send_command_to_target") ||
+                   opName.equalsIgnoreCase("send_action_to_target")) {
+            String target = String((const char*)(opJson["target"] | ""));
+            if (target.isEmpty()) {
+                target = String((const char*)(opJson["t"] | ""));
+            }
+
+            String entity = String((const char*)(opJson["entity"] | ""));
+            if (entity.isEmpty()) {
+                entity = String((const char*)(opJson["e"] | ""));
+            }
+
+            String command = String((const char*)(opJson["command"] | ""));
+            if (command.isEmpty()) {
+                command = String((const char*)(opJson["c"] | ""));
+            }
+
+            if (target.isEmpty() ||
+                entity.isEmpty() ||
+                command.isEmpty()) {
+                sendSerialFlasherError(
+                    requestId,
+                    "invalid_operation",
+                    "Send Command requires target, entity and command"
+                );
+
+                return true;
+            }
+
+            ArmorLinkRemoteCommandDef& remoteCommand =
+                _module->actionBuilder().upsertRemoteCommand(target, entity, command);
+            const int remoteCommandIndex =
+                _module->actionBuilder().findRemoteCommandIndex(remoteCommand.id);
+
+            if (remoteCommandIndex < 0 || remoteCommandIndex > 65535) {
+                sendSerialFlasherError(
+                    requestId,
+                    "invalid_operation",
+                    "Send Command to Target could not be registered"
+                );
+
+                return true;
+            }
+
+            op.code = ArmorLinkActionOpCode::SendActionToTarget;
+            op.componentIndex = 0xFF;
+            op.argument = static_cast<uint16_t>(remoteCommandIndex);
+        } else {
+            op.code = actionOpCodeFromString(opName);
+            String componentId =
+                String((const char*)(opJson["component"] | ""));
+            if (componentId.isEmpty()) {
+                componentId = String((const char*)(opJson["c"] | ""));
+            }
+            String componentLabel =
+                String((const char*)(opJson["componentLabel"] | ""));
+            if (componentLabel.isEmpty()) {
+                componentLabel = String((const char*)(opJson["cl"] | ""));
+            }
+
+            if (!componentId.isEmpty()) {
+                if (op.code == ArmorLinkActionOpCode::WaitUntilState ||
+                    op.code == ArmorLinkActionOpCode::StateSet) {
+                    _module->actionBuilder().upsertCustomComponent(
+                        componentId,
+                        ArmorLinkActionComponentKind::State,
+                        componentLabel,
+                        definition.section);
+                }
+            }
+
+            const int componentIndex =
+                op.code == ArmorLinkActionOpCode::ActionCall
+                    ? _module->actionBuilder().findActionTargetIndex(_module->actions(), componentId)
+                    : _module->actionBuilder().findComponentIndex(componentId);
+
+            if (static_cast<uint8_t>(op.code) == 0 ||
+                componentIndex < 0 ||
+                componentIndex > 254) {
+                sendSerialFlasherError(
+                    requestId,
+                    "invalid_operation",
+                    String("Invalid action operation: ") + opName
+                );
+
+                return true;
+            }
+
+            op.componentIndex = static_cast<uint8_t>(componentIndex);
+
+            if (op.code == ArmorLinkActionOpCode::WaitUntilState) {
+                int timeoutMs = opJson["durationMs"] | 0;
+                if (timeoutMs <= 0) {
+                    timeoutMs = opJson["ms"] | 5000;
+                }
+                op.argument = static_cast<uint16_t>(
+                    constrain(timeoutMs, 1, 60000));
+            } else if (op.code == ArmorLinkActionOpCode::StateSet) {
+                op.value = opJson["value"] | true;
+                if (!opJson["v"].isNull()) {
+                    op.value = opJson["v"] | true;
+                }
+            }
+        }
+
+        definition.ops.push_back(op);
+    }
+
+    if (_module->actionBuilder().wouldCreateCycle(_module->actions(), definition)) {
+        sendSerialFlasherError(
+            requestId,
+            "recursive_action",
+            "Action definition would create a recursive action call"
+        );
+
+        return true;
+    }
+
+    if (!_module->actionBuilder().setDefinition(definition) ||
+        !_storage.saveActionDefinition(
+            definition,
+            isCustomAction,
+            &_module->actionBuilder())) {
+        sendSerialFlasherError(
+            requestId,
+            "storage_error",
+            "Action definition could not be saved"
+        );
+
+        return true;
+    }
+
+    sendSerialActionDefinitionAck(requestId, definition);
+    return true;
+}
+
+ArmorLinkActionOpCode actionOpCodeFromString(const String& opName) const {
+    if (opName.equalsIgnoreCase("servo_open")) return ArmorLinkActionOpCode::ServoOpen;
+    if (opName.equalsIgnoreCase("servo_close")) return ArmorLinkActionOpCode::ServoClose;
+    if (opName.equalsIgnoreCase("led_on")) return ArmorLinkActionOpCode::LedOn;
+    if (opName.equalsIgnoreCase("led_off")) return ArmorLinkActionOpCode::LedOff;
+    if (opName.equalsIgnoreCase("gpio_high")) return ArmorLinkActionOpCode::GpioHigh;
+    if (opName.equalsIgnoreCase("gpio_low")) return ArmorLinkActionOpCode::GpioLow;
+    if (opName.equalsIgnoreCase("action_call")) return ArmorLinkActionOpCode::ActionCall;
+    if (opName.equalsIgnoreCase("wait_until_state")) return ArmorLinkActionOpCode::WaitUntilState;
+    if (opName.equalsIgnoreCase("wait_until_done")) return ArmorLinkActionOpCode::WaitUntilState;
+    if (opName.equalsIgnoreCase("repeat_previous")) return ArmorLinkActionOpCode::RepeatPrevious;
+    if (opName.equalsIgnoreCase("state_set")) return ArmorLinkActionOpCode::StateSet;
+    if (opName.equalsIgnoreCase("preset_apply")) return ArmorLinkActionOpCode::StateSet;
+    if (opName.equalsIgnoreCase("mode_set")) return ArmorLinkActionOpCode::StateSet;
+    if (opName.equalsIgnoreCase("send_command_to_target")) return ArmorLinkActionOpCode::SendActionToTarget;
+    if (opName.equalsIgnoreCase("send_action_to_target")) return ArmorLinkActionOpCode::SendActionToTarget;
+    return static_cast<ArmorLinkActionOpCode>(0);
+}
+
+ArmorLinkActionComponentKind actionComponentKindFromString(
+    const String& kindName
+) const {
+    if (kindName.equalsIgnoreCase("state")) return ArmorLinkActionComponentKind::State;
+    if (kindName.equalsIgnoreCase("waitTarget")) return ArmorLinkActionComponentKind::State;
+    if (kindName.equalsIgnoreCase("preset")) return ArmorLinkActionComponentKind::State;
+    if (kindName.equalsIgnoreCase("mode")) return ArmorLinkActionComponentKind::State;
+    return ArmorLinkActionComponentKind::Gpio;
+}
+
 bool handleSerialActionExecute(
     JsonDocument& doc,
     uint16_t requestId
@@ -2486,6 +2918,13 @@ bool handleSerialActionExecute(
         );
 
     if (action == nullptr) {
+        action = _module->actionBuilder().findCustomAction(
+            entity,
+            command
+        );
+    }
+
+    if (action == nullptr) {
         sendSerialFlasherError(
             requestId,
             "not_found",
@@ -2504,6 +2943,28 @@ bool handleSerialActionExecute(
             "action_disabled",
             String("Action is disabled: ") +
                 action->id
+        );
+
+        return true;
+    }
+
+    const bool hasActionDefinition =
+        _module->actionBuilder().findDefinition(action->entity, action->command) != nullptr;
+
+    if (hasActionDefinition && _module->actionBuilder().isRunning()) {
+        sendSerialFlasherError(
+            requestId,
+            "action_busy",
+            "Action sequence is already running"
+        );
+
+        return true;
+    }
+
+    if (_module->actionBuilder().execute(action->entity, action->command, _module->actions())) {
+        sendSerialActionAck(
+            requestId,
+            *action
         );
 
         return true;
@@ -3669,6 +4130,29 @@ void printPairingCandidates() {
 
     Serial.println("======================");
   }
+
+  bool sendActionBuilderCommandToTarget(
+      const String& target,
+      const String& entity,
+      const String& command) {
+    if (_module == nullptr ||
+        target.isEmpty() ||
+        entity.isEmpty() ||
+        command.isEmpty()) {
+      return false;
+    }
+
+    ArmorLinkPacket out = makeArmorLinkBasePacket(
+      AL_MSG_COMMAND,
+      _module->name().c_str(),
+      target.c_str(),
+      entity.c_str(),
+      command.c_str()
+    );
+
+    return _transport.sendPacketToTarget(target, out) == ESP_OK;
+  }
+
   static constexpr size_t MAX_TELEMETRY_KEYS = 16;
   TelemetryRateEntry _telemetryRates[MAX_TELEMETRY_KEYS]{};
   static constexpr size_t MAX_DATA_STREAM_RATE_KEYS = 8;

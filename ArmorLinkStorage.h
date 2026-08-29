@@ -298,6 +298,179 @@ static String sanitizeKey(const String& input) {
     return true;
   }
 
+  bool loadActionDefinitions(ArmorLinkModule& module) {
+    if (_namespace.isEmpty()) {
+      return false;
+    }
+
+    Preferences prefs;
+    if (!prefs.begin(_namespace.c_str(), true)) {
+      return false;
+    }
+
+    const String actionList = prefs.getString("act_list", "");
+    int start = 0;
+    while (start < static_cast<int>(actionList.length())) {
+      const int end = actionList.indexOf('\n', start);
+      const String line =
+          end < 0
+              ? actionList.substring(start)
+              : actionList.substring(start, end);
+
+      const int firstSep = line.indexOf('|');
+      const int secondSep = firstSep < 0 ? -1 : line.indexOf('|', firstSep + 1);
+      const int thirdSep = secondSep < 0 ? -1 : line.indexOf('|', secondSep + 1);
+
+      if (firstSep > 0 && secondSep > firstSep && thirdSep > secondSep) {
+        module.actionBuilder().upsertCustomAction(
+            line.substring(0, firstSep),
+            line.substring(firstSep + 1, secondSep),
+            line.substring(secondSep + 1, thirdSep),
+            line.substring(thirdSep + 1));
+      }
+
+      if (end < 0) {
+        break;
+      }
+      start = end + 1;
+    }
+
+    const String componentList = prefs.getString("act_comp", "");
+    start = 0;
+    while (start < static_cast<int>(componentList.length())) {
+      const int end = componentList.indexOf('\n', start);
+      const String line =
+          end < 0
+              ? componentList.substring(start)
+              : componentList.substring(start, end);
+
+      const int firstSep = line.indexOf('|');
+      const int secondSep = firstSep < 0 ? -1 : line.indexOf('|', firstSep + 1);
+      const int thirdSep = secondSep < 0 ? -1 : line.indexOf('|', secondSep + 1);
+      const int fourthSep = thirdSep < 0 ? -1 : line.indexOf('|', thirdSep + 1);
+
+      if (firstSep > 0 && secondSep > firstSep) {
+        module.actionBuilder().upsertCustomComponent(
+            line.substring(0, firstSep),
+            actionComponentKindFromString(line.substring(firstSep + 1, secondSep)),
+            thirdSep > secondSep
+                ? line.substring(secondSep + 1, thirdSep)
+                : line.substring(secondSep + 1),
+            thirdSep > secondSep
+                ? (fourthSep > thirdSep
+                    ? line.substring(thirdSep + 1, fourthSep)
+                    : line.substring(thirdSep + 1))
+                : String("Actions"),
+            fourthSep > thirdSep &&
+                line.substring(fourthSep + 1).equals("1"));
+      }
+
+      if (end < 0) {
+        break;
+      }
+      start = end + 1;
+    }
+
+    const String remoteCommandList = prefs.getString("act_rcmd", "");
+    start = 0;
+    while (start < static_cast<int>(remoteCommandList.length())) {
+      const int end = remoteCommandList.indexOf('\n', start);
+      const String line =
+          end < 0
+              ? remoteCommandList.substring(start)
+              : remoteCommandList.substring(start, end);
+
+      const int firstSep = line.indexOf('|');
+      const int secondSep = firstSep < 0 ? -1 : line.indexOf('|', firstSep + 1);
+
+      if (firstSep > 0 && secondSep > firstSep) {
+        module.actionBuilder().upsertRemoteCommand(
+            line.substring(0, firstSep),
+            line.substring(firstSep + 1, secondSep),
+            line.substring(secondSep + 1));
+      }
+
+      if (end < 0) {
+        break;
+      }
+      start = end + 1;
+    }
+
+    for (const auto& action : module.actions().items()) {
+      loadActionDefinitionForAction(prefs, module, action);
+    }
+
+    for (const auto& action : module.actionBuilder().customActions()) {
+      loadActionDefinitionForAction(prefs, module, action);
+    }
+
+    prefs.end();
+    return true;
+  }
+
+  bool saveActionDefinition(
+      const ArmorLinkActionDefinition& definition,
+      bool saveAsCustomAction = false,
+      const ArmorLinkActionBuilderRuntime* runtime = nullptr) {
+    if (_namespace.isEmpty() || definition.ops.size() > 63) {
+      return false;
+    }
+
+    const String storageKey =
+        sanitizeKey(String("act_") + definition.entity + "_" + definition.command);
+
+    if (storageKey.isEmpty()) {
+      return false;
+    }
+
+    std::vector<uint8_t> data;
+    data.reserve(1 + definition.ops.size() * 5);
+    data.push_back(static_cast<uint8_t>(definition.ops.size()));
+
+    for (const auto& op : definition.ops) {
+      data.push_back(static_cast<uint8_t>(op.code));
+      data.push_back(op.componentIndex);
+      data.push_back(static_cast<uint8_t>(op.argument & 0xFF));
+      data.push_back(static_cast<uint8_t>((op.argument >> 8) & 0xFF));
+      data.push_back(op.value ? 1 : 0);
+    }
+
+    Preferences prefs;
+    if (!prefs.begin(_namespace.c_str(), false)) {
+      return false;
+    }
+
+    const size_t written =
+        prefs.putBytes(storageKey.c_str(), data.data(), data.size());
+
+    if (saveAsCustomAction) {
+      saveCustomActionList(prefs, definition);
+    }
+    if (runtime != nullptr) {
+      saveCustomComponentList(prefs, *runtime);
+      saveRemoteCommandList(prefs, *runtime);
+    }
+    prefs.end();
+
+    return written == data.size();
+  }
+
+  bool saveActionComponents(
+      const ArmorLinkActionBuilderRuntime& runtime) {
+    if (_namespace.isEmpty()) {
+      return false;
+    }
+
+    Preferences prefs;
+    if (!prefs.begin(_namespace.c_str(), false)) {
+      return false;
+    }
+
+    saveCustomComponentList(prefs, runtime);
+    prefs.end();
+    return true;
+  }
+
   bool clearPairingInfo() {
     ArmorLinkPairingInfo empty{};
     return savePairingInfo(empty);
@@ -440,5 +613,171 @@ private:
     memset(buffer, 0, bufferSize);
     String value = prefs.getString(key, fallback);
     strncpy(buffer, value.c_str(), bufferSize - 1);
+  }
+
+  static String cleanActionListValue(const String& value) {
+    String cleaned = value;
+    cleaned.replace("|", " ");
+    cleaned.replace("\n", " ");
+    cleaned.replace("\r", " ");
+    return cleaned;
+  }
+
+  static void saveCustomActionList(
+      Preferences& prefs,
+      const ArmorLinkActionDefinition& definition) {
+    String actionList = prefs.getString("act_list", "");
+    const String prefix = definition.entity + "|" + definition.command + "|";
+    String nextList;
+
+    int start = 0;
+    while (start < static_cast<int>(actionList.length())) {
+      const int end = actionList.indexOf('\n', start);
+      const String line =
+          end < 0
+              ? actionList.substring(start)
+              : actionList.substring(start, end);
+
+      if (!line.startsWith(prefix) && !line.isEmpty()) {
+        nextList += line;
+        nextList += "\n";
+      }
+
+      if (end < 0) {
+        break;
+      }
+      start = end + 1;
+    }
+
+    nextList += prefix;
+    nextList += cleanActionListValue(definition.label);
+    nextList += "|";
+    nextList += cleanActionListValue(definition.section.isEmpty() ? String("Actions") : definition.section);
+    nextList += "\n";
+    prefs.putString("act_list", nextList);
+  }
+
+  static const char* actionComponentKindToString(
+      ArmorLinkActionComponentKind kind) {
+    switch (kind) {
+      case ArmorLinkActionComponentKind::Servo: return "servo";
+      case ArmorLinkActionComponentKind::Led: return "led";
+      case ArmorLinkActionComponentKind::Gpio: return "gpio";
+      case ArmorLinkActionComponentKind::State: return "state";
+      default: return "gpio";
+    }
+  }
+
+  static ArmorLinkActionComponentKind actionComponentKindFromString(
+      const String& kind) {
+    if (kind.equalsIgnoreCase("servo")) return ArmorLinkActionComponentKind::Servo;
+    if (kind.equalsIgnoreCase("led")) return ArmorLinkActionComponentKind::Led;
+    if (kind.equalsIgnoreCase("gpio")) return ArmorLinkActionComponentKind::Gpio;
+    if (kind.equalsIgnoreCase("state")) return ArmorLinkActionComponentKind::State;
+    if (kind.equalsIgnoreCase("waitTarget")) return ArmorLinkActionComponentKind::State;
+    if (kind.equalsIgnoreCase("preset")) return ArmorLinkActionComponentKind::State;
+    if (kind.equalsIgnoreCase("mode")) return ArmorLinkActionComponentKind::State;
+    return ArmorLinkActionComponentKind::Gpio;
+  }
+
+  static void saveCustomComponentList(
+      Preferences& prefs,
+      const ArmorLinkActionBuilderRuntime& runtime) {
+    String componentList;
+
+    for (const auto& component : runtime.components()) {
+      if (!component.custom) {
+        continue;
+      }
+
+      componentList += cleanActionListValue(component.id);
+      componentList += "|";
+      componentList += actionComponentKindToString(component.kind);
+      componentList += "|";
+      componentList += cleanActionListValue(component.label);
+      componentList += "|";
+      componentList += cleanActionListValue(component.section.isEmpty() ? String("Actions") : component.section);
+      componentList += "|";
+      componentList += component.defaultValue ? "1" : "0";
+      componentList += "\n";
+    }
+
+    prefs.putString("act_comp", componentList);
+  }
+
+  static void saveRemoteCommandList(
+      Preferences& prefs,
+      const ArmorLinkActionBuilderRuntime& runtime) {
+    String remoteCommandList;
+
+    for (const auto& remoteCommand : runtime.remoteCommands()) {
+      if (remoteCommand.target.isEmpty() ||
+          remoteCommand.entity.isEmpty() ||
+          remoteCommand.command.isEmpty()) {
+        continue;
+      }
+
+      remoteCommandList += cleanActionListValue(remoteCommand.target);
+      remoteCommandList += "|";
+      remoteCommandList += cleanActionListValue(remoteCommand.entity);
+      remoteCommandList += "|";
+      remoteCommandList += cleanActionListValue(remoteCommand.command);
+      remoteCommandList += "\n";
+    }
+
+    prefs.putString("act_rcmd", remoteCommandList);
+  }
+
+  static void loadActionDefinitionForAction(
+      Preferences& prefs,
+      ArmorLinkModule& module,
+      const ArmorLinkActionDef& action) {
+    const String storageKey =
+        sanitizeKey(String("act_") + action.entity + "_" + action.command);
+
+    const size_t length =
+        prefs.getBytesLength(storageKey.c_str());
+
+    if (length < 1) {
+      return;
+    }
+
+    std::vector<uint8_t> data(length);
+    if (prefs.getBytes(storageKey.c_str(), data.data(), data.size()) != length) {
+      return;
+    }
+
+    const uint8_t count = data[0];
+    const size_t opSize =
+        length >= 1 + static_cast<size_t>(count) * 5 ? 5 : 4;
+    if (length < 1 + static_cast<size_t>(count) * opSize) {
+      return;
+    }
+
+    ArmorLinkActionDefinition definition;
+    definition.entity = action.entity;
+    definition.command = action.command;
+    definition.label = action.label;
+    definition.section = action.section;
+    definition.ops.reserve(count);
+
+    for (uint8_t i = 0; i < count; ++i) {
+      const size_t offset = 1 + static_cast<size_t>(i) * opSize;
+      ArmorLinkActionOp op;
+      op.code = static_cast<ArmorLinkActionOpCode>(data[offset]);
+      if (data[offset] == 12) {
+        op.code = ArmorLinkActionOpCode::StateSet;
+      }
+      op.componentIndex = data[offset + 1];
+      op.argument =
+          static_cast<uint16_t>(data[offset + 2]) |
+          (static_cast<uint16_t>(data[offset + 3]) << 8);
+      if (opSize == 5) {
+        op.value = data[offset + 4] != 0;
+      }
+      definition.ops.push_back(op);
+    }
+
+    module.actionBuilder().setDefinition(definition);
   }
 };

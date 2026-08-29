@@ -32,6 +32,78 @@ enum class ArmorLinkActionStyle {
   Danger
 };
 
+enum class ArmorLinkActionComponentKind : uint8_t {
+  Servo,
+  Led,
+  Gpio,
+  State
+};
+
+enum class ArmorLinkActionOpCode : uint8_t {
+  ServoOpen = 1,
+  ServoClose = 2,
+  LedOn = 3,
+  LedOff = 4,
+  Wait = 5,
+  GpioHigh = 6,
+  GpioLow = 7,
+  ActionCall = 8,
+  WaitUntilState = 9,
+  RepeatPrevious = 10,
+  StateSet = 11,
+  SendActionToTarget = 13
+};
+
+struct ArmorLinkActionOp {
+  ArmorLinkActionOpCode code = ArmorLinkActionOpCode::Wait;
+  uint8_t componentIndex = 0xFF;
+  uint16_t argument = 0;
+  bool value = true;
+};
+
+struct ArmorLinkActionDefinition {
+  String entity;
+  String command;
+  String label;
+  String section = "Actions";
+  std::vector<ArmorLinkActionOp> ops;
+};
+
+struct ArmorLinkActionTargetDef {
+  String id;
+  String label;
+  String entity;
+  String command;
+};
+
+struct ArmorLinkRemoteCommandDef {
+  String id;
+  String target;
+  String entity;
+  String command;
+};
+
+using ArmorLinkActionComponentHandler =
+    std::function<void(ArmorLinkActionOpCode op)>;
+
+using ArmorLinkActionReadyPredicate =
+    std::function<bool()>;
+
+using ArmorLinkRemoteActionHandler =
+    std::function<bool(const String& target, const String& entity, const String& command)>;
+
+struct ArmorLinkActionComponentDef {
+  String id;
+  String label;
+  String section;
+  ArmorLinkActionComponentKind kind = ArmorLinkActionComponentKind::Gpio;
+  ArmorLinkActionComponentHandler handler;
+  ArmorLinkActionReadyPredicate isReady;
+  bool custom = false;
+  bool ready = false;
+  bool defaultValue = false;
+};
+
 struct ArmorLinkIntBinding {
   int* ptr = nullptr;
 };
@@ -729,6 +801,659 @@ private:
   std::vector<ArmorLinkActionDef> _actions;
 };
 
+class ArmorLinkActionComponentBuilder {
+public:
+  explicit ArmorLinkActionComponentBuilder(ArmorLinkActionComponentDef& component)
+      : _component(component) {}
+
+  ArmorLinkActionComponentBuilder& label(const String& value) {
+    _component.label = value.isEmpty() ? _component.id : value;
+    return *this;
+  }
+
+  ArmorLinkActionComponentBuilder& onExecute(ArmorLinkActionComponentHandler handler) {
+    _component.handler = handler;
+    return *this;
+  }
+
+  ArmorLinkActionComponentBuilder& onReady(ArmorLinkActionReadyPredicate predicate) {
+    _component.isReady = predicate;
+    return *this;
+  }
+
+private:
+  ArmorLinkActionComponentDef& _component;
+};
+
+class ArmorLinkActionBuilderRuntime {
+public:
+  ArmorLinkActionComponentBuilder addComponent(
+      const String& id,
+      ArmorLinkActionComponentKind kind) {
+    for (auto& component : _components) {
+      if (component.id.equalsIgnoreCase(id)) {
+        component.kind = kind;
+        if (component.section.isEmpty()) {
+          component.section = "Actions";
+        }
+        return ArmorLinkActionComponentBuilder(component);
+      }
+    }
+
+    ArmorLinkActionComponentDef component;
+    component.id = id;
+    component.label = id;
+    component.section = "Actions";
+    component.kind = kind;
+    _components.push_back(component);
+    return ArmorLinkActionComponentBuilder(_components.back());
+  }
+
+  ArmorLinkActionComponentDef& upsertCustomComponent(
+      const String& id,
+      ArmorLinkActionComponentKind kind,
+      const String& label = "",
+      const String& section = "",
+      bool defaultValue = false) {
+    for (auto& component : _components) {
+      if (component.id.equalsIgnoreCase(id)) {
+        component.kind = kind;
+        if (!label.isEmpty()) {
+          component.label = label;
+        }
+        if (!section.isEmpty()) {
+          component.section = section;
+        }
+        component.defaultValue = defaultValue;
+        component.ready = defaultValue;
+        component.custom = true;
+        return component;
+      }
+    }
+
+    ArmorLinkActionComponentDef component;
+    component.id = id;
+    component.label = label.isEmpty() ? id : label;
+    component.section = section.isEmpty() ? String("Actions") : section;
+    component.kind = kind;
+    component.custom = true;
+    component.defaultValue = defaultValue;
+    component.ready = defaultValue;
+    _components.push_back(component);
+    return _components.back();
+  }
+
+  ArmorLinkActionComponentBuilder addServo(const String& id) {
+    return addComponent(id, ArmorLinkActionComponentKind::Servo);
+  }
+
+  ArmorLinkActionComponentBuilder addLed(const String& id) {
+    return addComponent(id, ArmorLinkActionComponentKind::Led);
+  }
+
+  ArmorLinkActionComponentBuilder addGpio(const String& id) {
+    return addComponent(id, ArmorLinkActionComponentKind::Gpio);
+  }
+
+  ArmorLinkActionComponentBuilder addState(const String& id) {
+    return addComponent(id, ArmorLinkActionComponentKind::State);
+  }
+
+  ArmorLinkActionComponentBuilder addWaitTarget(const String& id) {
+    return addState(id);
+  }
+
+  ArmorLinkActionComponentBuilder addPreset(const String& id) {
+    return addState(id);
+  }
+
+  ArmorLinkActionComponentBuilder addMode(const String& id) {
+    return addState(id);
+  }
+
+  const std::vector<ArmorLinkActionComponentDef>& components() const {
+    return _components;
+  }
+
+  const std::vector<ArmorLinkActionDef>& customActions() const {
+    return _customActions;
+  }
+
+  const std::vector<ArmorLinkRemoteCommandDef>& remoteCommands() const {
+    return _remoteCommands;
+  }
+
+  std::vector<ArmorLinkActionDef>& customActions() {
+    return _customActions;
+  }
+
+  ArmorLinkRemoteCommandDef& upsertRemoteCommand(
+      const String& target,
+      const String& entity,
+      const String& command) {
+    const String id = remoteCommandId(target, entity, command);
+
+    for (auto& remoteCommand : _remoteCommands) {
+      if (remoteCommand.id.equalsIgnoreCase(id)) {
+        remoteCommand.target = target;
+        remoteCommand.entity = entity;
+        remoteCommand.command = command;
+        return remoteCommand;
+      }
+    }
+
+    ArmorLinkRemoteCommandDef remoteCommand;
+    remoteCommand.id = id;
+    remoteCommand.target = target;
+    remoteCommand.entity = entity;
+    remoteCommand.command = command;
+    _remoteCommands.push_back(remoteCommand);
+    return _remoteCommands.back();
+  }
+
+  int findRemoteCommandIndex(const String& id) const {
+    for (size_t i = 0; i < _remoteCommands.size(); ++i) {
+      if (_remoteCommands[i].id.equalsIgnoreCase(id)) {
+        return static_cast<int>(i);
+      }
+    }
+
+    return -1;
+  }
+
+  void onRemoteAction(ArmorLinkRemoteActionHandler handler) {
+    _remoteActionHandler = handler;
+  }
+
+  static String remoteCommandId(
+      const String& target,
+      const String& entity,
+      const String& command) {
+    return target + "|" + entity + "/" + command;
+  }
+
+  ArmorLinkActionDef* findCustomAction(
+      const String& entity,
+      const String& command) {
+    for (auto& action : _customActions) {
+      if (action.entity.equalsIgnoreCase(entity) &&
+          action.command.equalsIgnoreCase(command)) {
+        return &action;
+      }
+    }
+
+    return nullptr;
+  }
+
+  ArmorLinkActionDef& upsertCustomAction(
+      const String& entity,
+      const String& command,
+      const String& label,
+      const String& section) {
+    ArmorLinkActionDef* existing = findCustomAction(entity, command);
+    if (existing != nullptr) {
+      existing->label = label.isEmpty() ? command : label;
+      existing->section = section.isEmpty() ? String("Actions") : section;
+      existing->enabled = true;
+      return *existing;
+    }
+
+    ArmorLinkActionDef action;
+    action.id = entity + "." + command;
+    action.label = label.isEmpty() ? command : label;
+    action.section = section.isEmpty() ? String("Actions") : section;
+    action.entity = entity;
+    action.command = command;
+    action.style = ArmorLinkActionStyle::Secondary;
+    action.enabled = true;
+    _customActions.push_back(action);
+    return _customActions.back();
+  }
+
+  int findComponentIndex(const String& id) const {
+    for (size_t i = 0; i < _components.size(); ++i) {
+      if (_components[i].id.equalsIgnoreCase(id)) {
+        return static_cast<int>(i);
+      }
+    }
+
+    return -1;
+  }
+
+  const ArmorLinkActionDefinition* findDefinition(
+      const String& entity,
+      const String& command) const {
+    for (const auto& definition : _definitions) {
+      if (definition.entity.equalsIgnoreCase(entity) &&
+          definition.command.equalsIgnoreCase(command)) {
+        return &definition;
+      }
+    }
+
+    return nullptr;
+  }
+
+  const std::vector<ArmorLinkActionDefinition>& definitions() const {
+    return _definitions;
+  }
+
+  std::vector<ArmorLinkActionTargetDef> actionTargets(
+      const ArmorLinkActionRegistry& actions) const {
+    std::vector<ArmorLinkActionTargetDef> targets;
+
+    for (const auto& action : actions.items()) {
+      if (!action.enabled) continue;
+      ArmorLinkActionTargetDef target;
+      target.id = action.entity + "/" + action.command;
+      target.label = action.label;
+      target.entity = action.entity;
+      target.command = action.command;
+      targets.push_back(target);
+    }
+
+    for (const auto& action : _customActions) {
+      if (!action.enabled) continue;
+      ArmorLinkActionTargetDef target;
+      target.id = action.entity + "/" + action.command;
+      target.label = action.label;
+      target.entity = action.entity;
+      target.command = action.command;
+      targets.push_back(target);
+    }
+
+    return targets;
+  }
+
+  int findActionTargetIndex(
+      const ArmorLinkActionRegistry& actions,
+      const String& id) const {
+    auto targets = actionTargets(actions);
+    for (size_t i = 0; i < targets.size(); ++i) {
+      if (targets[i].id.equalsIgnoreCase(id)) {
+        return static_cast<int>(i);
+      }
+    }
+
+    return -1;
+  }
+
+  bool setDefinition(const ArmorLinkActionDefinition& definition) {
+    for (auto& existing : _definitions) {
+      if (existing.entity.equalsIgnoreCase(definition.entity) &&
+          existing.command.equalsIgnoreCase(definition.command)) {
+        existing = definition;
+        return true;
+      }
+    }
+
+    _definitions.push_back(definition);
+    return true;
+  }
+
+  bool wouldCreateCycle(
+      const ArmorLinkActionRegistry& actions,
+      const ArmorLinkActionDefinition& candidate) const {
+    return reachesAction(actions, candidate, candidate.entity, candidate.command, 0);
+  }
+
+  bool execute(
+      const String& entity,
+      const String& command,
+      const ArmorLinkActionRegistry& actions) {
+    if (_running) {
+      return false;
+    }
+
+    const ArmorLinkActionDefinition* definition =
+        findDefinition(entity, command);
+
+    if (definition == nullptr || definition->ops.empty()) {
+      return false;
+    }
+
+    _activeOps.clear();
+    _activeIndex = 0;
+    clearWaitState();
+
+    if (!appendDefinitionOps(*definition, actions, 0)) {
+      _activeOps.clear();
+      return false;
+    }
+
+    if (_activeOps.empty()) {
+      return false;
+    }
+
+    _running = true;
+    tick(actions);
+    return true;
+  }
+
+  bool isRunning() const {
+    return _running;
+  }
+
+  void tick(const ArmorLinkActionRegistry& actions) {
+    if (!_running) {
+      return;
+    }
+
+    if (_waitingForDelay) {
+      if (static_cast<uint32_t>(millis() - _waitStartedAtMs) < _waitDurationMs) {
+        return;
+      }
+
+      _waitingForDelay = false;
+      _activeIndex++;
+    }
+
+    if (_waitingForState) {
+      if (_waitComponentIndex >= _components.size()) {
+        stop();
+        return;
+      }
+
+      auto& component = _components[_waitComponentIndex];
+      const bool ready = component.isReady ? component.isReady() : component.ready;
+      if (ready) {
+        _waitingForState = false;
+        _activeIndex++;
+      } else if (static_cast<uint32_t>(millis() - _waitStartedAtMs) >= _waitDurationMs) {
+        stop();
+      }
+
+      return;
+    }
+
+    while (_running && _activeIndex < _activeOps.size()) {
+      const ArmorLinkActionOp& op = _activeOps[_activeIndex];
+
+      if (op.code == ArmorLinkActionOpCode::Wait) {
+        _waitStartedAtMs = millis();
+        _waitDurationMs = op.argument;
+        _waitingForDelay = true;
+        if (_waitDurationMs == 0) {
+          _waitingForDelay = false;
+          _activeIndex++;
+          continue;
+        }
+        return;
+      }
+
+      if (op.code == ArmorLinkActionOpCode::WaitUntilState) {
+        if (op.componentIndex >= _components.size()) {
+          stop();
+          return;
+        }
+
+        auto& component = _components[op.componentIndex];
+        const bool ready = component.isReady ? component.isReady() : component.ready;
+        if (ready) {
+          _activeIndex++;
+          continue;
+        }
+
+        _waitComponentIndex = op.componentIndex;
+        _waitStartedAtMs = millis();
+        _waitDurationMs = op.argument == 0 ? 5000 : op.argument;
+        _waitingForState = true;
+        return;
+      }
+
+      if (!executeImmediateOp(op, actions)) {
+        stop();
+        return;
+      }
+
+      _activeIndex++;
+    }
+
+    if (_running && _activeIndex >= _activeOps.size()) {
+      stop();
+    }
+  }
+
+  void stop() {
+    _running = false;
+    _activeOps.clear();
+    _activeIndex = 0;
+    clearWaitState();
+  }
+
+private:
+  static constexpr size_t MaxActiveOps = 256;
+
+  void clearWaitState() {
+    _waitingForDelay = false;
+    _waitingForState = false;
+    _waitStartedAtMs = 0;
+    _waitDurationMs = 0;
+    _waitComponentIndex = 0xFF;
+  }
+
+  bool appendDefinitionOps(
+      const ArmorLinkActionDefinition& definition,
+      const ArmorLinkActionRegistry& actions,
+      uint8_t depth) {
+    return appendDefinitionOpsTo(definition, actions, depth, _activeOps);
+  }
+
+  bool appendDefinitionOpsTo(
+      const ArmorLinkActionDefinition& definition,
+      const ArmorLinkActionRegistry& actions,
+      uint8_t depth,
+      std::vector<ArmorLinkActionOp>& targetOps) {
+    if (depth > 8) {
+      return false;
+    }
+
+    std::vector<ArmorLinkActionOp> previousGroup;
+
+    for (const auto& op : definition.ops) {
+      if (op.code == ArmorLinkActionOpCode::RepeatPrevious) {
+        if (previousGroup.empty()) {
+          return false;
+        }
+
+        const uint16_t repeatCount = min<uint16_t>(op.argument, 20);
+        for (uint16_t i = 0; i < repeatCount; ++i) {
+          if (!appendOpsTo(previousGroup, targetOps)) {
+            return false;
+          }
+        }
+        continue;
+      }
+
+      std::vector<ArmorLinkActionOp> group;
+      if (!buildOpGroup(op, actions, depth, group) ||
+          group.empty() ||
+          !appendOpsTo(group, targetOps)) {
+        return false;
+      }
+
+      previousGroup = group;
+    }
+
+    return true;
+  }
+
+  bool buildOpGroup(
+      const ArmorLinkActionOp& op,
+      const ArmorLinkActionRegistry& actions,
+      uint8_t depth,
+      std::vector<ArmorLinkActionOp>& out) {
+    if (op.code == ArmorLinkActionOpCode::RepeatPrevious) {
+      return false;
+    }
+
+    if (op.code != ArmorLinkActionOpCode::ActionCall) {
+      out.push_back(op);
+      return true;
+    }
+
+    auto targets = actionTargets(actions);
+    if (op.componentIndex >= targets.size()) {
+      return false;
+    }
+
+    const auto& target = targets[op.componentIndex];
+    const ArmorLinkActionDefinition* nested =
+        findDefinition(target.entity, target.command);
+
+    if (nested == nullptr) {
+      out.push_back(op);
+      return true;
+    }
+
+    const size_t before = out.size();
+    if (!appendDefinitionOpsTo(*nested, actions, depth + 1, out)) {
+      return false;
+    }
+
+    return out.size() > before;
+  }
+
+  static bool appendOpsTo(
+      const std::vector<ArmorLinkActionOp>& source,
+      std::vector<ArmorLinkActionOp>& target) {
+    if (target.size() + source.size() > MaxActiveOps) {
+      return false;
+    }
+
+    target.insert(target.end(), source.begin(), source.end());
+    return true;
+  }
+
+  bool executeImmediateOp(
+      const ArmorLinkActionOp& op,
+      const ArmorLinkActionRegistry& actions) {
+    if (op.code == ArmorLinkActionOpCode::Wait ||
+        op.code == ArmorLinkActionOpCode::WaitUntilState ||
+        op.code == ArmorLinkActionOpCode::RepeatPrevious) {
+      return false;
+    }
+
+    if (op.code == ArmorLinkActionOpCode::SendActionToTarget) {
+      if (!_remoteActionHandler ||
+          op.argument >= _remoteCommands.size()) {
+        return false;
+      }
+
+      const auto& remoteCommand = _remoteCommands[op.argument];
+      return _remoteActionHandler(
+          remoteCommand.target,
+          remoteCommand.entity,
+          remoteCommand.command);
+    }
+
+    if (op.code == ArmorLinkActionOpCode::ActionCall) {
+      auto targets = actionTargets(actions);
+      if (op.componentIndex >= targets.size()) {
+        return false;
+      }
+
+      const auto& target = targets[op.componentIndex];
+      for (const auto& action : actions.items()) {
+        if (action.entity.equalsIgnoreCase(target.entity) &&
+            action.command.equalsIgnoreCase(target.command) &&
+            action.callback) {
+          action.callback();
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    if (op.componentIndex >= _components.size()) {
+      return false;
+    }
+
+    auto& component = _components[op.componentIndex];
+
+    if (!component.handler) {
+      if (op.code == ArmorLinkActionOpCode::StateSet &&
+          component.kind == ArmorLinkActionComponentKind::State) {
+        component.ready = op.value;
+        return true;
+      }
+
+      return false;
+    }
+
+    component.handler(op.code);
+    if (op.code == ArmorLinkActionOpCode::StateSet &&
+        component.kind == ArmorLinkActionComponentKind::State) {
+      component.ready = op.value;
+    }
+    return true;
+  }
+
+  const ArmorLinkActionDefinition* findEffectiveDefinition(
+      const ArmorLinkActionDefinition& candidate,
+      const String& entity,
+      const String& command) const {
+    if (candidate.entity.equalsIgnoreCase(entity) &&
+        candidate.command.equalsIgnoreCase(command)) {
+      return &candidate;
+    }
+
+    return findDefinition(entity, command);
+  }
+
+  bool reachesAction(
+      const ArmorLinkActionRegistry& actions,
+      const ArmorLinkActionDefinition& candidate,
+      const String& entity,
+      const String& command,
+      uint8_t depth) const {
+    if (depth > 8) {
+      return true;
+    }
+
+    const ArmorLinkActionDefinition* definition =
+        findEffectiveDefinition(candidate, entity, command);
+
+    if (definition == nullptr) {
+      return false;
+    }
+
+    auto targets = actionTargets(actions);
+    for (const auto& op : definition->ops) {
+      if (op.code != ArmorLinkActionOpCode::ActionCall ||
+          op.componentIndex >= targets.size()) {
+        continue;
+      }
+
+      const auto& target = targets[op.componentIndex];
+      if (target.entity.equalsIgnoreCase(candidate.entity) &&
+          target.command.equalsIgnoreCase(candidate.command)) {
+        return true;
+      }
+
+      if (reachesAction(actions, candidate, target.entity, target.command, depth + 1)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  std::vector<ArmorLinkActionComponentDef> _components;
+  std::vector<ArmorLinkActionDef> _customActions;
+  std::vector<ArmorLinkActionDefinition> _definitions;
+  std::vector<ArmorLinkRemoteCommandDef> _remoteCommands;
+  std::vector<ArmorLinkActionOp> _activeOps;
+  size_t _activeIndex = 0;
+  uint32_t _waitStartedAtMs = 0;
+  uint32_t _waitDurationMs = 0;
+  uint8_t _waitComponentIndex = 0xFF;
+  bool _running = false;
+  bool _waitingForDelay = false;
+  bool _waitingForState = false;
+  ArmorLinkRemoteActionHandler _remoteActionHandler;
+};
+
 class ArmorLinkModule {
 public:
   template <size_t NameN>
@@ -801,6 +1526,9 @@ public:
   ArmorLinkActionRegistry& actions() { return _actions; }
   const ArmorLinkActionRegistry& actions() const { return _actions; }
 
+  ArmorLinkActionBuilderRuntime& actionBuilder() { return _actionBuilder; }
+  const ArmorLinkActionBuilderRuntime& actionBuilder() const { return _actionBuilder; }
+
   ArmorLinkSerialRegistry& serial() {
       return _serial;
   }
@@ -825,5 +1553,6 @@ private:
   bool _profileNameImported = false;
   ArmorLinkConfigRegistry _config;
   ArmorLinkActionRegistry _actions;
+  ArmorLinkActionBuilderRuntime _actionBuilder;
   ArmorLinkSerialRegistry _serial;
 };

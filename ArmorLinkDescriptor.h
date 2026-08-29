@@ -214,10 +214,27 @@ private:
 
     writeBoolProperty(out, first, "supportsPartialConfigGet", false);
     writeBoolProperty(out, first, "supportsConfigSet", true);
+    if (isWebSerial) {
+      writeBoolProperty(out, first, "supportsActionBuilder",
+                        module.actionBuilder().components().size() > 0 ||
+                        module.actions().items().size() > 0 ||
+                        module.actionBuilder().customActions().size() > 0);
+    }
     writeStringProperty(out, first, "moduleType", moduleTypeToString(module.type()));
 
     if (isWebSerial && !module.profileTarget().isEmpty()) {
       writeStringProperty(out, first, "profileTarget", module.profileTarget());
+    }
+
+    if (isWebSerial) {
+      writePropertyName(out, first, "actionComponents");
+      writeActionComponentsStreaming(module, out);
+
+      writePropertyName(out, first, "actionDefinitions");
+      writeActionDefinitionsStreaming(module, out);
+
+      writePropertyName(out, first, "actionTargets");
+      writeActionTargetsStreaming(module, out);
     }
 
     writePropertyName(out, first, "sections");
@@ -269,6 +286,25 @@ private:
 
       if (!found) {
         orderedSections.push_back(actionSection);
+      }
+    }
+
+    if (isWebSerial) {
+      for (const auto& action : module.actionBuilder().customActions()) {
+        const String actionSection =
+            action.section.isEmpty() ? String("Actions") : action.section;
+
+        bool found = false;
+        for (const auto& existing : orderedSections) {
+          if (normalizeId(existing) == normalizeId(actionSection)) {
+            found = true;
+            break;
+          }
+        }
+
+        if (!found) {
+          orderedSections.push_back(actionSection);
+        }
       }
     }
 
@@ -479,11 +515,34 @@ private:
                                     Print& out,
                                     Profile profile,
                                     const String& sectionName) {
+    const bool isWebSerial = profile == Profile::WebSerial;
     bool firstAction = true;
 
     for (const auto& action : module.actions().items()) {
       const String actionSection =
           action.section.isEmpty() ? String("General") : action.section;
+
+      if (normalizeId(actionSection) != normalizeId(sectionName)) {
+        continue;
+      }
+
+      if (!firstAction) {
+        out.print(',');
+      }
+      firstAction = false;
+
+      out.print('{');
+      appendActionStreaming(action, out, profile);
+      out.print('}');
+    }
+
+    if (!isWebSerial) {
+      return;
+    }
+
+    for (const auto& action : module.actionBuilder().customActions()) {
+      const String actionSection =
+          action.section.isEmpty() ? String("Actions") : action.section;
 
       if (normalizeId(actionSection) != normalizeId(sectionName)) {
         continue;
@@ -530,6 +589,126 @@ private:
     if (!action.confirmText.isEmpty()) {
       writeStringProperty(out, first, "confirmText", action.confirmText);
     }
+  }
+
+  static void writeActionComponentsStreaming(const ArmorLinkModule& module,
+                                             Print& out) {
+    out.print('[');
+    bool firstComponent = true;
+
+    for (const auto& component : module.actionBuilder().components()) {
+      if (!firstComponent) {
+        out.print(',');
+      }
+      firstComponent = false;
+
+      bool first = true;
+      out.print('{');
+      writeStringProperty(out, first, "id", component.id);
+      writeStringProperty(out, first, "label", component.label);
+      writeStringProperty(out, first, "kind",
+                          actionComponentKindToString(component.kind));
+      if (!component.section.isEmpty()) {
+        writeStringProperty(out, first, "section", component.section);
+      }
+      if (component.kind == ArmorLinkActionComponentKind::State) {
+        writeBoolProperty(out, first, "defaultValue", component.defaultValue);
+        writeBoolProperty(out, first, "value", component.ready);
+      }
+      out.print('}');
+    }
+
+    out.print(']');
+  }
+
+  static void writeActionDefinitionsStreaming(const ArmorLinkModule& module,
+                                              Print& out) {
+    out.print('[');
+    bool firstDefinition = true;
+
+    for (const auto& definition : module.actionBuilder().definitions()) {
+      if (!firstDefinition) {
+        out.print(',');
+      }
+      firstDefinition = false;
+
+      bool first = true;
+      out.print('{');
+      writeStringProperty(out, first, "entity", definition.entity);
+      writeStringProperty(out, first, "command", definition.command);
+      if (!definition.label.isEmpty()) {
+        writeStringProperty(out, first, "label", definition.label);
+      }
+      if (!definition.section.isEmpty()) {
+        writeStringProperty(out, first, "section", definition.section);
+      }
+      writePropertyName(out, first, "operations");
+      out.print('[');
+
+      bool firstOp = true;
+      for (const auto& op : definition.ops) {
+        if (!firstOp) {
+          out.print(',');
+        }
+        firstOp = false;
+
+        bool firstOpProperty = true;
+        out.print('{');
+        writeStringProperty(out, firstOpProperty, "op", actionOpCodeToString(op.code));
+        if (op.code == ArmorLinkActionOpCode::Wait ||
+            op.code == ArmorLinkActionOpCode::WaitUntilState) {
+          writeIntProperty(out, firstOpProperty, "durationMs", op.argument);
+        }
+        if (op.code == ArmorLinkActionOpCode::StateSet) {
+          writeBoolProperty(out, firstOpProperty, "value", op.value);
+        }
+        if (op.code == ArmorLinkActionOpCode::RepeatPrevious) {
+          writeIntProperty(out, firstOpProperty, "count", op.argument);
+        } else if (op.code == ArmorLinkActionOpCode::SendActionToTarget &&
+                   op.argument < module.actionBuilder().remoteCommands().size()) {
+          const auto& remoteCommand = module.actionBuilder().remoteCommands()[op.argument];
+          writeStringProperty(out, firstOpProperty, "target", remoteCommand.target);
+          writeStringProperty(out, firstOpProperty, "entity", remoteCommand.entity);
+          writeStringProperty(out, firstOpProperty, "command", remoteCommand.command);
+        } else if (op.code != ArmorLinkActionOpCode::Wait &&
+                   op.componentIndex < module.actionBuilder().components().size()) {
+          writeStringProperty(
+              out,
+              firstOpProperty,
+              "component",
+              module.actionBuilder().components()[op.componentIndex].id);
+        }
+        out.print('}');
+      }
+
+      out.print(']');
+      out.print('}');
+    }
+
+    out.print(']');
+  }
+
+  static void writeActionTargetsStreaming(const ArmorLinkModule& module,
+                                          Print& out) {
+    out.print('[');
+    bool firstTarget = true;
+
+    for (const auto& target : module.actionBuilder().actionTargets(module.actions())) {
+      if (!firstTarget) {
+        out.print(',');
+      }
+      firstTarget = false;
+
+      bool first = true;
+      out.print('{');
+      writeStringProperty(out, first, "id", target.id);
+      writeStringProperty(out, first, "label", target.label);
+      writeStringProperty(out, first, "entity", target.entity);
+      writeStringProperty(out, first, "command", target.command);
+      out.print('}');
+    }
+
+    out.print(']');
   }
 
   static void writePropertyName(Print& out,
@@ -747,9 +926,28 @@ private:
     }
     doc["supportsPartialConfigGet"] = false;
     doc["supportsConfigSet"] = true;
+    if (isWebSerial) {
+      doc["supportsActionBuilder"] =
+          module.actionBuilder().components().size() > 0 ||
+          module.actions().items().size() > 0 ||
+          module.actionBuilder().customActions().size() > 0;
+    }
     doc["moduleType"] = moduleTypeToString(module.type());
     if (isWebSerial && !module.profileTarget().isEmpty()) {
       doc["profileTarget"] = module.profileTarget();
+    }
+    if (isWebSerial) {
+      JsonArray actionComponents =
+          doc.createNestedArray("actionComponents");
+      appendActionComponents(module, actionComponents);
+
+      JsonArray actionDefinitions =
+          doc.createNestedArray("actionDefinitions");
+      appendActionDefinitions(module, actionDefinitions);
+
+      JsonArray actionTargets =
+          doc.createNestedArray("actionTargets");
+      appendActionTargets(module, actionTargets);
     }
     JsonArray sections = doc.createNestedArray("sections");
     appendSections(module, sections, profile);
@@ -809,6 +1007,108 @@ private:
     }
   }
 
+  static const char* actionComponentKindToString(
+      ArmorLinkActionComponentKind kind) {
+    switch (kind) {
+      case ArmorLinkActionComponentKind::Servo: return "servo";
+      case ArmorLinkActionComponentKind::Led: return "led";
+      case ArmorLinkActionComponentKind::Gpio: return "gpio";
+      case ArmorLinkActionComponentKind::State: return "state";
+      default: return "gpio";
+    }
+  }
+
+  static const char* actionOpCodeToString(ArmorLinkActionOpCode op) {
+    switch (op) {
+      case ArmorLinkActionOpCode::ServoOpen: return "servo_open";
+      case ArmorLinkActionOpCode::ServoClose: return "servo_close";
+      case ArmorLinkActionOpCode::LedOn: return "led_on";
+      case ArmorLinkActionOpCode::LedOff: return "led_off";
+      case ArmorLinkActionOpCode::Wait: return "wait";
+      case ArmorLinkActionOpCode::GpioHigh: return "gpio_high";
+      case ArmorLinkActionOpCode::GpioLow: return "gpio_low";
+      case ArmorLinkActionOpCode::ActionCall: return "action_call";
+      case ArmorLinkActionOpCode::WaitUntilState: return "wait_until_state";
+      case ArmorLinkActionOpCode::RepeatPrevious: return "repeat_previous";
+      case ArmorLinkActionOpCode::StateSet: return "state_set";
+      case ArmorLinkActionOpCode::SendActionToTarget: return "send_command_to_target";
+      default: return "wait";
+    }
+  }
+
+  static void appendActionComponents(
+      const ArmorLinkModule& module,
+      JsonArray actionComponents) {
+    for (const auto& component : module.actionBuilder().components()) {
+      JsonObject out = actionComponents.createNestedObject();
+      out["id"] = component.id;
+      out["label"] = component.label;
+      out["kind"] = actionComponentKindToString(component.kind);
+      if (!component.section.isEmpty()) {
+        out["section"] = component.section;
+      }
+      if (component.kind == ArmorLinkActionComponentKind::State) {
+        out["defaultValue"] = component.defaultValue;
+        out["value"] = component.ready;
+      }
+    }
+  }
+
+  static void appendActionDefinitions(
+      const ArmorLinkModule& module,
+      JsonArray actionDefinitions) {
+    for (const auto& definition : module.actionBuilder().definitions()) {
+      JsonObject out = actionDefinitions.createNestedObject();
+      out["entity"] = definition.entity;
+      out["command"] = definition.command;
+      if (!definition.label.isEmpty()) {
+        out["label"] = definition.label;
+      }
+      if (!definition.section.isEmpty()) {
+        out["section"] = definition.section;
+      }
+
+      JsonArray operations = out.createNestedArray("operations");
+      for (const auto& op : definition.ops) {
+        JsonObject opOut = operations.createNestedObject();
+        opOut["op"] = actionOpCodeToString(op.code);
+
+        if (op.code == ArmorLinkActionOpCode::Wait ||
+            op.code == ArmorLinkActionOpCode::WaitUntilState) {
+          opOut["durationMs"] = op.argument;
+        }
+        if (op.code == ArmorLinkActionOpCode::StateSet) {
+          opOut["value"] = op.value;
+        }
+        if (op.code == ArmorLinkActionOpCode::RepeatPrevious) {
+          opOut["count"] = op.argument;
+        } else if (op.code == ArmorLinkActionOpCode::SendActionToTarget &&
+                   op.argument < module.actionBuilder().remoteCommands().size()) {
+          const auto& remoteCommand = module.actionBuilder().remoteCommands()[op.argument];
+          opOut["target"] = remoteCommand.target;
+          opOut["entity"] = remoteCommand.entity;
+          opOut["command"] = remoteCommand.command;
+        } else if (op.code != ArmorLinkActionOpCode::Wait &&
+                   op.componentIndex < module.actionBuilder().components().size()) {
+          opOut["component"] =
+              module.actionBuilder().components()[op.componentIndex].id;
+        }
+      }
+    }
+  }
+
+  static void appendActionTargets(
+      const ArmorLinkModule& module,
+      JsonArray actionTargets) {
+    for (const auto& target : module.actionBuilder().actionTargets(module.actions())) {
+      JsonObject out = actionTargets.createNestedObject();
+      out["id"] = target.id;
+      out["label"] = target.label;
+      out["entity"] = target.entity;
+      out["command"] = target.command;
+    }
+  }
+
   static void appendSections(const ArmorLinkModule& module, JsonArray sections, Profile profile) {
     const bool isWebSerial = profile == Profile::WebSerial;
     std::vector<String> orderedSections;
@@ -836,6 +1136,23 @@ private:
     for (const auto& action : module.actions().items()) {
       const String actionSection =
           action.section.isEmpty() ? String("General") : action.section;
+
+      bool found = false;
+      for (const auto& existing : orderedSections) {
+        if (normalizeId(existing) == normalizeId(actionSection)) {
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        orderedSections.push_back(actionSection);
+      }
+    }
+
+    for (const auto& action : module.actionBuilder().customActions()) {
+      const String actionSection =
+          action.section.isEmpty() ? String("Actions") : action.section;
 
       bool found = false;
       for (const auto& existing : orderedSections) {
@@ -994,6 +1311,18 @@ private:
       for (const auto& action : module.actions().items()) {
         const String actionSection =
             action.section.isEmpty() ? String("General") : action.section;
+
+        if (normalizeId(actionSection) != normalizeId(sectionName)) {
+          continue;
+        }
+
+        JsonObject out = actions.createNestedObject();
+        appendAction(action, out, profile);
+      }
+
+      for (const auto& action : module.actionBuilder().customActions()) {
+        const String actionSection =
+            action.section.isEmpty() ? String("Actions") : action.section;
 
         if (normalizeId(actionSection) != normalizeId(sectionName)) {
           continue;
