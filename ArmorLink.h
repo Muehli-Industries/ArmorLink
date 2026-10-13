@@ -302,6 +302,7 @@ public:
     _options = options;
     initializeSystemConfig(module, _options);
     registerSystemConfig(module);
+    registerSystemActions(module);
 
     _storage.begin(resolveNamespace(module, options));
     _storage.load(module);
@@ -315,9 +316,11 @@ public:
     setGatewayMode(_options.enableGateway);
 
     String storedProfileName;
+    String storedProfileIdentifier;
+    _storage.loadProfileIdentifier(storedProfileIdentifier);
     if (_storage.loadProfileName(storedProfileName) &&
         !storedProfileName.isEmpty()) {
-      module.activeProfileName(storedProfileName);
+      module.activeProfile(storedProfileIdentifier, storedProfileName);
     }
     _storage.loadPairingInfo(_pairingInfo);
     _pairedModuleCount = _storage.loadPairedModules(_pairedModules);
@@ -457,6 +460,7 @@ public:
 
     String out;
     serializeJson(doc, out);
+    doc.clear();
     bleNotifyEventJson(out);
   }
 
@@ -499,20 +503,20 @@ public:
     _localConfigTransferActive = true;
 
     {
-      String bleJson = buildBleDescriptor();
-
-      if (!bleJson.isEmpty()) {
+      size_t descriptorLength = 0;
+      if (ArmorLinkDescriptor::measureBle(*_module, descriptorLength)) {
         Serial.printf("[CONFIG] local descriptor length=%u | profile=ble\n",
-                      static_cast<unsigned>(bleJson.length()));
-        bleNotifyConfigJsonChunked(
+                      static_cast<unsigned>(descriptorLength));
+        const bool sent = ArmorLinkBLE.notifyConfigJsonStreamChunked(
           target,
           "",
           requestId,
-          bleJson,
+          descriptorLength,
+          [this](Print& out) { return ArmorLinkDescriptor::writeBle(*_module, out); },
           false
         );
         _localConfigTransferActive = false;
-        return;
+        if (sent) return;
       }
     }
 
@@ -573,6 +577,25 @@ void setGatewayMode(bool enabled) {
     return _pairingInfo.paired;
   }
 
+  // Only this node's gateway association. Config, profiles, actions and the
+  // gateway's paired-module list are deliberately left untouched.
+  bool resetPairingInfo() {
+    if (!_storage.clearPairingInfo()) {
+      Serial.println("[PAIR] Failed to reset pairing info");
+      return false;
+    }
+    _peers.removePeer(String(_pairingInfo.gatewayName));
+    _pairingInfo = ArmorLinkPairingInfo{};
+    _options.defaultLogTarget = "";
+    _remoteTelemetryEnabled = false;
+    _remoteLoggingEnabled = false;
+    _hasPendingPairResponse = false;
+    clearRemotePairingQuiet(0);
+    initStartupHelloState();
+    Serial.println("[PAIR] Pairing info reset; all other settings preserved");
+    return true;
+  }
+
   const char* pairedGatewayName() const {
     return _pairingInfo.gatewayName;
   }
@@ -626,8 +649,15 @@ void onBleConnected() {
 
     doc["bleName"] = _options.bleName;
 
+    if (doc.overflowed()) {
+      Serial.printf("[BLE][TX] gateway_descriptor allocation failed: heap8=%u largestBlock8=%u\n",
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+      return;
+    }
     String out;
-    serializeJson(doc, out);    
+    serializeJson(doc, out);
+    doc.clear();
     Serial.printf("[BLE][TX] gateway_descriptor bytes=%u\n",
                   static_cast<unsigned>(out.length()));
     bleNotifyEventJson(out);
@@ -1159,6 +1189,7 @@ void onBleDisconnected() {
 
     String out;
     serializeJson(doc, out);
+    doc.clear();
     bleNotifyLogJson(out);
   }
   void onEspNowDataReceived(const uint8_t* data, int len) {
@@ -1269,8 +1300,17 @@ void onBleDisconnected() {
       security["pinSet"] = ArmorLinkBLE.isPinSet();
       doc["projectName"] = ArmorLinkBLE.getProjectName();
 
+      if (doc.overflowed()) {
+        Serial.printf("[BLE][TX] security status allocation failed: heap8=%u largestBlock8=%u\n",
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        notifyEventJson("{\"type\":\"error\",\"message\":\"Security status allocation failed\"}");
+        return true;
+      }
       String out;
-      serializeJson(doc, out);      
+      serializeJson(doc, out);
+      // Do not retain this pool while constructing the gateway descriptor.
+      doc.clear();
       Serial.printf("[BLE][TX] status bytes=%u\n",
                     static_cast<unsigned>(out.length()));
       notifyEventJson(out);
@@ -1940,6 +1980,25 @@ private:
     }
   }
 
+  void registerSystemActions(ArmorLinkModule& module) {
+    // Reuse the reserved action if begin() is called again.
+    ArmorLinkActionDef* existing = findAction("pairing", "reset");
+    if (existing != nullptr) {
+      existing->label = "Reset Pairing info";
+      existing->section = "ArmorLink";
+      existing->enabled = true;
+      existing->confirmText = "Reset this node's gateway pairing? The node will need to be paired again. All other settings will be kept.";
+      existing->callback = [this]() { resetPairingInfo(); };
+      return;
+    }
+    module.actions().add("resetPairingInfo")
+        .label("Reset Pairing info").section("ArmorLink")
+        .description("Remove only this node's gateway pairing. All other settings are kept.")
+        .command("pairing", "reset")
+        .confirm("Reset this node's gateway pairing? The node will need to be paired again. All other settings will be kept.")
+        .onExecute([this]() { resetPairingInfo(); });
+  }
+
   void applySystemConfig() {
     if (_module == nullptr) {
       return;
@@ -2099,8 +2158,23 @@ private:
               requestId
           );
       }
+      if (type.equalsIgnoreCase("action_definition_preview")) {
+          return handleSerialActionDefinitionSet(doc, requestId, true);
+      }
+      if (type.equalsIgnoreCase("action_definition_delete")) {
+          return handleSerialActionDefinitionDelete(
+              doc,
+              requestId
+          );
+      }
       if (type.equalsIgnoreCase("action_component_set")) {
           return handleSerialActionComponentSet(
+              doc,
+              requestId
+          );
+      }
+      if (type.equalsIgnoreCase("action_component_delete")) {
+          return handleSerialActionComponentDelete(
               doc,
               requestId
           );
@@ -2464,6 +2538,27 @@ void sendSerialActionDefinitionAck(
     Serial.println(json);
 }
 
+void sendSerialActionDefinitionDeleteAck(
+    uint16_t requestId,
+    const String& entity,
+    const String& command
+) {
+    StaticJsonDocument<384> doc;
+
+    doc["type"] = "ack";
+    doc["requestId"] = requestId;
+    doc["status"] = "ok";
+    doc["operation"] = "action_definition_delete";
+    doc["entity"] = entity;
+    doc["command"] = command;
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+}
+
 void sendSerialActionComponentAck(
     uint16_t requestId,
     const ArmorLinkActionComponentDef& component
@@ -2477,6 +2572,25 @@ void sendSerialActionComponentAck(
     doc["id"] = component.id;
     doc["label"] = component.label;
     doc["section"] = component.section;
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.print("@ALF:");
+    Serial.println(json);
+}
+
+void sendSerialActionComponentDeleteAck(
+    uint16_t requestId,
+    const String& id
+) {
+    StaticJsonDocument<384> doc;
+
+    doc["type"] = "ack";
+    doc["requestId"] = requestId;
+    doc["status"] = "ok";
+    doc["operation"] = "action_component_delete";
+    doc["id"] = id;
 
     String json;
     serializeJson(doc, json);
@@ -2518,11 +2632,38 @@ bool handleSerialActionComponentSet(
     if (!componentJson["d"].isNull()) {
         defaultValue = componentJson["d"] | false;
     }
+    const int servoPin = componentJson["pin"] | -1;
+    const int servoOpenPosition = componentJson["openPosition"] | 90;
+    const int servoClosedPosition = componentJson["closedPosition"] | 0;
+    const int servoMinPulseUs = componentJson["minPulseUs"] | 500;
+    const int servoMaxPulseUs = componentJson["maxPulseUs"] | 2400;
+    const String servoProfile =
+        String((const char*)(componentJson["servoProfile"] | ""));
+    const int ledPin = componentJson["ledPin"] | -1;
+    const int ledCount = componentJson["ledCount"] | 1;
+    const int ledStartIndex = componentJson["ledStartIndex"] | 0;
+    const int ledBrightness = componentJson["ledBrightness"] | 128;
+    const String ledChipset =
+        String((const char*)(componentJson["ledChipset"] | "WS2812B"));
+    const String ledColorOrder =
+        String((const char*)(componentJson["ledColorOrder"] | "GRB"));
+    const int gpioPin = componentJson["gpioPin"] | -1;
+    const String gpioMode =
+        String((const char*)(componentJson["gpioMode"] | "output"));
+    const bool gpioDefaultLevel = componentJson["gpioDefaultLevel"] | false;
+    const bool gpioActiveLow = componentJson["gpioActiveLow"] | false;
+    const int buttonPin = componentJson["buttonPin"] | -1;
+    const bool buttonActiveLow = componentJson["buttonActiveLow"] | true;
+    const int buttonDebounceMs = componentJson["buttonDebounceMs"] | 30;
+    const int buttonMultiGapMs = componentJson["buttonMultiGapMs"] | 300;
+    const int buttonLongPressMs = componentJson["buttonLongPressMs"] | 500;
     const ArmorLinkActionComponentKind kind =
         actionComponentKindFromString(kindName);
 
     if (id.isEmpty() ||
-        kind != ArmorLinkActionComponentKind::State) {
+        !isValidActionComponentKind(kindName) ||
+        (kind == ArmorLinkActionComponentKind::Servo &&
+            servoMinPulseUs >= servoMaxPulseUs)) {
         sendSerialFlasherError(
             requestId,
             "invalid_component",
@@ -2540,6 +2681,79 @@ bool handleSerialActionComponentSet(
             section,
             defaultValue);
 
+    if (kind == ArmorLinkActionComponentKind::Servo) {
+        _module->actionBuilder().setServoConfig(
+            component,
+            servoPin,
+            constrain(servoOpenPosition, 0, 180),
+            constrain(servoClosedPosition, 0, 180),
+            constrain(servoMinPulseUs, 400, 1500),
+            constrain(servoMaxPulseUs, 1500, 3000),
+            servoProfile);
+    }
+
+    if (kind == ArmorLinkActionComponentKind::Led) {
+        _module->actionBuilder().setLedConfig(
+            component,
+            constrain(ledPin, -1, 48),
+            constrain(ledCount, 1, 1024),
+            constrain(ledStartIndex, 0, 1023),
+            constrain(ledBrightness, 0, 255),
+            ledChipset,
+            ledColorOrder);
+    }
+
+    if (kind == ArmorLinkActionComponentKind::Gpio) {
+        _module->actionBuilder().setGpioConfig(
+            component,
+            constrain(gpioPin, -1, 48),
+            gpioMode,
+            gpioDefaultLevel,
+            gpioActiveLow);
+    }
+
+    if (kind == ArmorLinkActionComponentKind::Button) {
+        _module->actionBuilder().setButtonConfig(
+            component,
+            constrain(buttonPin, -1, 48),
+            buttonActiveLow,
+            buttonDebounceMs,
+            buttonMultiGapMs,
+            buttonLongPressMs);
+        _module->actionBuilder().clearButtonEventRoutes(component);
+
+        JsonArray buttonEvents =
+            componentJson["buttonEvents"].as<JsonArray>();
+
+        for (JsonObject routeJson : buttonEvents) {
+            const String event =
+                String((const char*)(routeJson["event"] | ""));
+            const String mode =
+                String((const char*)(routeJson["mode"] | "sendCommand"));
+            const bool enabled = routeJson["enabled"] | true;
+            const String action =
+                String((const char*)(routeJson["action"] | ""));
+            const String target =
+                String((const char*)(routeJson["target"] | ""));
+            const String entity =
+                String((const char*)(routeJson["entity"] | ""));
+            const String command =
+                String((const char*)(routeJson["command"] | ""));
+
+            if (!event.isEmpty()) {
+                _module->actionBuilder().addButtonEventRoute(
+                    component,
+                    event,
+                    mode,
+                    enabled,
+                    action,
+                    target,
+                    entity,
+                    command);
+            }
+        }
+    }
+
     if (!_storage.saveActionComponents(_module->actionBuilder())) {
         sendSerialFlasherError(
             requestId,
@@ -2554,9 +2768,71 @@ bool handleSerialActionComponentSet(
     return true;
 }
 
-bool handleSerialActionDefinitionSet(
+bool handleSerialActionComponentDelete(
     JsonDocument& doc,
     uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+
+        return true;
+    }
+
+    const String id = String((const char*)(doc["id"] | ""));
+    if (id.isEmpty()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_component",
+            "Action component id is missing"
+        );
+
+        return true;
+    }
+
+    const int index = _module->actionBuilder().findComponentIndex(id);
+    if (index < 0) {
+        sendSerialFlasherError(
+            requestId,
+            "component_not_found",
+            "Action component was not found"
+        );
+
+        return true;
+    }
+
+    if (!_module->actionBuilder().components()[index].custom) {
+        sendSerialFlasherError(
+            requestId,
+            "firmware_component_readonly",
+            "Firmware-defined action components cannot be deleted from WebSerial"
+        );
+
+        return true;
+    }
+
+    if (!_module->actionBuilder().removeCustomComponent(id) ||
+        !_storage.deleteActionComponent(_module->actionBuilder())) {
+        sendSerialFlasherError(
+            requestId,
+            "storage_error",
+            "Action component could not be deleted"
+        );
+
+        return true;
+    }
+
+    sendSerialActionComponentDeleteAck(requestId, id);
+    return true;
+}
+
+bool handleSerialActionDefinitionSet(
+    JsonDocument& doc,
+    uint16_t requestId,
+    bool preview = false
 ) {
     if (_module == nullptr) {
         sendSerialFlasherError(
@@ -2619,7 +2895,17 @@ bool handleSerialActionDefinitionSet(
     const bool isCustomAction =
         findAction(definition.entity, definition.command) == nullptr;
 
-    if (isCustomAction &&
+    if (!preview && !isCustomAction) {
+        sendSerialFlasherError(
+            requestId,
+            "firmware_action_readonly",
+            "Firmware-defined actions cannot be changed from WebSerial"
+        );
+
+        return true;
+    }
+
+    if (!preview && isCustomAction &&
         _module->actionBuilder().findCustomAction(definition.entity, definition.command) == nullptr) {
         _module->actionBuilder().upsertCustomAction(
             definition.entity,
@@ -2771,6 +3057,30 @@ bool handleSerialActionDefinitionSet(
                 if (!opJson["v"].isNull()) {
                     op.value = opJson["v"] | true;
                 }
+            } else if (op.code == ArmorLinkActionOpCode::ServoMoveTo) {
+                int position = opJson["position"] | -1;
+                if (position < 0) {
+                    position = opJson["p"] | 90;
+                }
+                op.argument = static_cast<uint16_t>(
+                    constrain(position, 0, 180));
+                int moveDurationMs = opJson["durationMs"] | 0;
+                if (moveDurationMs <= 0) moveDurationMs = opJson["ms"] | 0;
+                op.durationMs = static_cast<uint16_t>(constrain(moveDurationMs, 0, 60000));
+                const String easing = String((const char*)(opJson["easing"] | "linear"));
+                op.option = easing.equalsIgnoreCase("easeIn") ? 1 : easing.equalsIgnoreCase("easeOut") ? 2 : easing.equalsIgnoreCase("easeInOut") ? 3 : 0;
+            } else if (op.code == ArmorLinkActionOpCode::LedSetColor) {
+                String color = String((const char*)(opJson["color"] | "#FFFFFF"));
+                if (color.startsWith("#")) color.remove(0, 1);
+                op.color = static_cast<uint32_t>(strtoul(color.c_str(), nullptr, 16)) & 0xFFFFFF;
+            } else if (op.code == ArmorLinkActionOpCode::LedSetBrightness) {
+                op.intensity = static_cast<uint8_t>(constrain(opJson["brightness"] | 128, 0, 255));
+            } else if (op.code == ArmorLinkActionOpCode::LedAnimation) {
+                const String animation = String((const char*)(opJson["animation"] | "rainbow"));
+                op.option = animation.equalsIgnoreCase("pulse") ? 1 : animation.equalsIgnoreCase("blink") ? 2 : animation.equalsIgnoreCase("chase") ? 3 : animation.equalsIgnoreCase("solid") ? 4 : 0;
+                int animationSpeedMs = opJson["durationMs"] | 0;
+                if (animationSpeedMs <= 0) animationSpeedMs = opJson["ms"] | 500;
+                op.durationMs = static_cast<uint16_t>(constrain(animationSpeedMs, 25, 10000));
             }
         }
 
@@ -2784,6 +3094,15 @@ bool handleSerialActionDefinitionSet(
             "Action definition would create a recursive action call"
         );
 
+        return true;
+    }
+
+    if (preview) {
+        if (!_module->actionBuilder().executeDefinition(definition, _module->actions())) {
+            sendSerialFlasherError(requestId, "preview_failed", "Action preview could not be started");
+            return true;
+        }
+        sendSerialActionDefinitionAck(requestId, definition);
         return true;
     }
 
@@ -2805,11 +3124,79 @@ bool handleSerialActionDefinitionSet(
     return true;
 }
 
+bool handleSerialActionDefinitionDelete(
+    JsonDocument& doc,
+    uint16_t requestId
+) {
+    if (_module == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "not_initialized",
+            "ArmorLink module is not initialized"
+        );
+
+        return true;
+    }
+
+    const String entity = String((const char*)(doc["entity"] | ""));
+    const String command = String((const char*)(doc["command"] | ""));
+
+    if (entity.isEmpty() || command.isEmpty()) {
+        sendSerialFlasherError(
+            requestId,
+            "missing_action",
+            "Action entity or command is missing"
+        );
+
+        return true;
+    }
+
+    if (findAction(entity, command) != nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "firmware_action_readonly",
+            "Firmware-defined actions cannot be deleted from WebSerial"
+        );
+
+        return true;
+    }
+
+    if (_module->actionBuilder().findCustomAction(entity, command) == nullptr) {
+        sendSerialFlasherError(
+            requestId,
+            "action_not_found",
+            "Custom action was not found"
+        );
+
+        return true;
+    }
+
+    _module->actionBuilder().removeDefinition(entity, command);
+    _module->actionBuilder().removeCustomAction(entity, command);
+
+    if (!_storage.deleteActionDefinition(entity, command)) {
+        sendSerialFlasherError(
+            requestId,
+            "storage_error",
+            "Action definition could not be deleted"
+        );
+
+        return true;
+    }
+
+    sendSerialActionDefinitionDeleteAck(requestId, entity, command);
+    return true;
+}
+
 ArmorLinkActionOpCode actionOpCodeFromString(const String& opName) const {
     if (opName.equalsIgnoreCase("servo_open")) return ArmorLinkActionOpCode::ServoOpen;
     if (opName.equalsIgnoreCase("servo_close")) return ArmorLinkActionOpCode::ServoClose;
+    if (opName.equalsIgnoreCase("servo_move_to")) return ArmorLinkActionOpCode::ServoMoveTo;
     if (opName.equalsIgnoreCase("led_on")) return ArmorLinkActionOpCode::LedOn;
     if (opName.equalsIgnoreCase("led_off")) return ArmorLinkActionOpCode::LedOff;
+    if (opName.equalsIgnoreCase("led_set_color")) return ArmorLinkActionOpCode::LedSetColor;
+    if (opName.equalsIgnoreCase("led_set_brightness")) return ArmorLinkActionOpCode::LedSetBrightness;
+    if (opName.equalsIgnoreCase("led_animation")) return ArmorLinkActionOpCode::LedAnimation;
     if (opName.equalsIgnoreCase("gpio_high")) return ArmorLinkActionOpCode::GpioHigh;
     if (opName.equalsIgnoreCase("gpio_low")) return ArmorLinkActionOpCode::GpioLow;
     if (opName.equalsIgnoreCase("action_call")) return ArmorLinkActionOpCode::ActionCall;
@@ -2827,11 +3214,28 @@ ArmorLinkActionOpCode actionOpCodeFromString(const String& opName) const {
 ArmorLinkActionComponentKind actionComponentKindFromString(
     const String& kindName
 ) const {
+    if (kindName.equalsIgnoreCase("servo")) return ArmorLinkActionComponentKind::Servo;
+    if (kindName.equalsIgnoreCase("led")) return ArmorLinkActionComponentKind::Led;
+    if (kindName.equalsIgnoreCase("gpio")) return ArmorLinkActionComponentKind::Gpio;
+    if (kindName.equalsIgnoreCase("button")) return ArmorLinkActionComponentKind::Button;
     if (kindName.equalsIgnoreCase("state")) return ArmorLinkActionComponentKind::State;
     if (kindName.equalsIgnoreCase("waitTarget")) return ArmorLinkActionComponentKind::State;
     if (kindName.equalsIgnoreCase("preset")) return ArmorLinkActionComponentKind::State;
     if (kindName.equalsIgnoreCase("mode")) return ArmorLinkActionComponentKind::State;
     return ArmorLinkActionComponentKind::Gpio;
+}
+
+bool isValidActionComponentKind(
+    const String& kindName
+) const {
+    return kindName.equalsIgnoreCase("servo") ||
+        kindName.equalsIgnoreCase("led") ||
+        kindName.equalsIgnoreCase("gpio") ||
+        kindName.equalsIgnoreCase("button") ||
+        kindName.equalsIgnoreCase("state") ||
+        kindName.equalsIgnoreCase("waitTarget") ||
+        kindName.equalsIgnoreCase("preset") ||
+        kindName.equalsIgnoreCase("mode");
 }
 
 bool handleSerialActionExecute(
@@ -3626,8 +4030,11 @@ bool handleSerialProfileSet(
 
     String requestedName =
         String((const char*)(doc["name"] | ""));
+    String requestedIdentifier =
+        String((const char*)(doc["identifier"] | ""));
 
     requestedName.trim();
+    requestedIdentifier.trim();
 
     if (requestedName.isEmpty()) {
         sendSerialFlasherError(
@@ -3649,18 +4056,30 @@ bool handleSerialProfileSet(
         return true;
     }
 
+    if (requestedIdentifier.length() > 180) {
+        sendSerialFlasherError(
+            requestId,
+            "invalid_identifier",
+            "Profile identifier is too long"
+        );
+
+        return true;
+    }
+
+    const String previousIdentifier =
+        _module->profileIdentifier();
     const String previousName =
         _module->profileName();
 
-    _module->activeProfileName(requestedName);
+    _module->activeProfile(requestedIdentifier, requestedName);
 
-    if (!_storage.saveProfileName(requestedName)) {
-        _module->profileName(previousName);
+    if (!_storage.saveProfileMetadata(requestedIdentifier, requestedName)) {
+        _module->activeProfile(previousIdentifier, previousName);
 
         sendSerialFlasherError(
             requestId,
             "storage_error",
-            "Profile name could not be saved"
+            "Profile metadata could not be saved"
         );
 
         return true;
@@ -3672,9 +4091,13 @@ bool handleSerialProfileSet(
     outDoc["requestId"] = requestId;
     outDoc["status"] = "ok";
     outDoc["operation"] = "profile_set";
+    outDoc["previousIdentifier"] = previousIdentifier;
     outDoc["previousName"] = previousName;
+    outDoc["profileIdentifier"] = requestedIdentifier;
     outDoc["profileName"] = requestedName;
-    outDoc["changed"] = previousName != requestedName;
+    outDoc["changed"] =
+        previousName != requestedName ||
+        previousIdentifier != requestedIdentifier;
 
     String json;
     serializeJson(outDoc, json);
@@ -3897,35 +4320,51 @@ void sendSerialConfigDescriptor(
     const ArmorLinkModule& module
 ) {
     constexpr size_t chunkSize = 192;
-    size_t descriptorLength = 0;
-
-    ArmorLinkSerialDescriptorPrint chunkedSerial(Serial, chunkSize);
-
-    if (!ArmorLinkDescriptor::measureWebSerial(module, descriptorLength)) {
-        sendSerialFlasherError(
-            requestId,
-            "descriptor_build_failed",
-            "Config descriptor could not be serialized"
-        );
+    // Snapshot once: metadata and payload must describe the same document.
+    const String descriptor = ArmorLinkDescriptor::buildWebSerial(module);
+    if (descriptor.isEmpty()) {
+        sendSerialFlasherError(requestId, "descriptor_build_failed",
+                               "Config descriptor could not be serialized");
         return;
     }
 
-    Serial.print("@ALF:CONFIG_BEGIN ");
-    Serial.print(requestId);
-    Serial.print(' ');
-    Serial.println(descriptorLength);
-
-    if (!ArmorLinkDescriptor::writeWebSerial(module, chunkedSerial)) {
-        chunkedSerial.flushChunk();
-        Serial.print("@ALF:CONFIG_END ");
-        Serial.println(requestId);
-        return;
+    // Keep UTF-8 characters intact when each chunk is decoded independently.
+    auto chunkEnd = [&](size_t start) {
+        size_t end = min(start + chunkSize, descriptor.length());
+        while (end < descriptor.length() && end > start &&
+               (static_cast<uint8_t>(descriptor[end]) & 0xC0) == 0x80) {
+            --end;
+        }
+        return end;
+    };
+    size_t chunkCount = 0;
+    for (size_t start = 0; start < descriptor.length(); start = chunkEnd(start)) {
+        ++chunkCount;
     }
 
-    chunkedSerial.flushChunk();
+    auto sendFrame = [&](const char* type, size_t index, const String& data) {
+        StaticJsonDocument<768> doc;
+        doc["type"] = type;
+        doc["requestId"] = requestId;
+        doc["chunkCount"] = chunkCount;
+        doc["totalLength"] = descriptor.length();
+        if (strcmp(type, "config_chunk") == 0) {
+            doc["chunkIndex"] = index;
+            doc["data"] = data;
+        }
+        String frame;
+        serializeJson(doc, frame);
+        emitSerialTransportJson(frame);
+    };
 
-    Serial.print("@ALF:CONFIG_END ");
-    Serial.println(requestId);
+    sendFrame("config_meta", 0, "");
+    size_t index = 0;
+    for (size_t start = 0; start < descriptor.length();) {
+        const size_t end = chunkEnd(start);
+        sendFrame("config_chunk", index++, descriptor.substring(start, end));
+        start = end;
+    }
+    sendFrame("config_end", 0, "");
 }
 
 void sendSerialFlasherError(
@@ -4781,6 +5220,8 @@ void printPairingCandidates() {
 
     String out;
     serializeJson(doc, out);
+    doc.clear();
+    values.clear();
     bleNotifyEventJson(out);
   }
 
@@ -5143,6 +5584,8 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
 
     String out;
     serializeJson(outDoc, out);
+    outDoc.clear();
+    inDoc.clear();
     Serial.printf("[PAIR][GW] BLE pairing required compact event: %s\n", out.c_str());
     bleNotifyEventJson(out);
   }
@@ -5184,19 +5627,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
 
       AL_VERBOSELN("[PAIR] Unpair command received");
 
-      _storage.clearPairingInfo();
-      memset(&_pairingInfo, 0, sizeof(_pairingInfo));
-
-      _options.defaultLogTarget = "";
-      _remoteTelemetryEnabled = false;
-      _remoteLoggingEnabled = false;
-
-      _startupHelloActive = false;
-      _startupHelloAcked = false;
-      _startupHelloUntilMs = 0;
-      _lastStartupHelloMs = 0;
-      _startupHelloAttempt = 0;
-      _lastHeartbeatMs = 0;
+      resetPairingInfo();
 
       AL_VERBOSELN("[PAIR] Module unpaired locally");
       return true;
@@ -5880,6 +6311,7 @@ void emitModulePresenceSnapshot() {
 
     String out;
     serializeJson(doc, out);
+    doc.clear();
     AL_VERBOSE("[PRESENCE] BLE SNAPSHOT EVENT: %s\n", out.c_str());
     Serial.printf("[BLE][TX] module_presence_snapshot bytes=%u modules=%u\n",
                   static_cast<unsigned>(out.length()),
@@ -5907,6 +6339,7 @@ void emitModulePresenceSnapshot() {
 
     String out;
     serializeJson(doc, out);
+    doc.clear();
     AL_VERBOSE("[PRESENCE] BLE EVENT: %s\n", out.c_str());
 
     AL_VERBOSE("[PRESENCE] JSON length=%u\n", static_cast<unsigned>(out.length()));
@@ -6003,6 +6436,7 @@ void emitModulePresenceSnapshot() {
 
       String out;
       serializeJson(doc, out);
+      doc.clear();
       bleNotifyLogJson(out);
       return;
     }
@@ -6613,6 +7047,7 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
 
   String out;
   serializeJson(doc, out);
+  doc.clear();
   bleNotifyEventJson(out);
 }
   void upsertStoredPairedModule(const char* name, const char* type, const char* mac) {
@@ -6677,7 +7112,9 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
 
     String out;
     serializeJson(doc, out);
+    doc.clear();
     bleNotifyEventJson(out);
+    emitSerialTransportJson(out);
   }
 
   void emitPairingCandidateEvent(const ArmorLinkPairingCandidate& candidate) {
@@ -6702,6 +7139,7 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
     serializeJson(doc, out);
     Serial.printf("[PAIR][GW] BLE pairing_candidate event: %s\n", out.c_str());
     bleNotifyEventJson(out);
+    emitSerialTransportJson(out);
   }
 
   void emitPendingPairingCandidateEvents() {
@@ -6741,7 +7179,9 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
 
     String out;
     serializeJson(doc, out);
+    doc.clear();
     bleNotifyEventJson(out);
+    emitSerialTransportJson(out);
   }
 
   void emitPairingLinkedEvent(const String& gatewayName, const String& gatewayMac) {
@@ -6752,7 +7192,9 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
 
     String out;
     serializeJson(doc, out);
+    doc.clear();
     bleNotifyEventJson(out);
+    emitSerialTransportJson(out);
   }
 
   static String resolveNamespace(const ArmorLinkModule& module, const ArmorLinkOptions& options) {
@@ -6994,6 +7436,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
         bleNotifyLogJson(out);
         break;
       }
@@ -7003,6 +7446,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         StaticJsonDocument<384> inDoc;
         DeserializationError err = deserializeJson(inDoc, payload);
         if (err) {
+          inDoc.clear();
           logWarn("telemetry", "decode", String("Invalid telemetry JSON: ") + err.c_str());
           break;
         }
@@ -7024,7 +7468,9 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         }
 
         String out;
-        serializeJson(doc, out);        
+        serializeJson(doc, out);
+        doc.clear();
+        inDoc.clear();
         bleNotifyEventJson(out);
         emitSerialEventJson(out);
         break;
@@ -7152,6 +7598,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
         bleNotifyEventJson(out);
         emitSerialTransportJson(out);
         break;
@@ -7190,6 +7637,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
         bleNotifyEventJson(out);
         emitSerialTransportJson(out);
         break;
@@ -7206,6 +7654,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
         bleNotifyEventJson(out);
         emitSerialTransportJson(out);
         break;
@@ -7221,6 +7670,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
         bleNotifyEventJson(out);
         emitSerialTransportJson(out);
         break;
@@ -7235,6 +7685,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
         bleNotifyEventJson(out);
         emitSerialTransportJson(out);
         break;
@@ -7492,6 +7943,7 @@ private:
 
     String out;
     serializeJson(doc, out);
+    doc.clear();
     Serial.printf("[BLE][TX] ack requestId=%u status=%s bytes=%u\n",
                   requestId,
                   status.c_str(),
@@ -7510,6 +7962,7 @@ private:
 
     String out;
     serializeJson(doc, out);
+    doc.clear();
     bleNotifyEventJson(out);
   }
 

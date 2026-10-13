@@ -8,6 +8,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <ArduinoJson.h>
+#include <esp_heap_caps.h>
 #include "ArmorLinkProtocol.h"
 #include "ArmorLinkSecurity.h"
 
@@ -118,6 +119,12 @@ public:
 
     BLEAdvertising* advertising = BLEDevice::getAdvertising();
     advertising->addServiceUUID(ARMORLINK_SERVICE_UUID);
+    // Keep the local name separate from the 128-bit service UUID so both
+    // fit into the legacy BLE advertising packets used by iOS discovery.
+    BLEAdvertisementData scanResponse;
+    scanResponse.setName(deviceName);
+    advertising->setScanResponseData(scanResponse);
+    advertising->setScanResponse(true);
     BLEDevice::startAdvertising();
   }
 
@@ -175,6 +182,11 @@ public:
     }
 
     Serial.printf("[BLE][TX] event bytes=%u\n", static_cast<unsigned>(json.length()));
+    if (json.length() <= 2) {
+      Serial.printf("[BLE][TX] short event=%s heap8=%u largestBlock8=%u\n",
+                    json.c_str(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    }
     _eventTxChar->setValue((uint8_t*)json.c_str(), json.length());
     _eventTxChar->notify();
 
@@ -281,6 +293,7 @@ void processPendingConfigTransfer() {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
         notifyEventJson(out);
 
         Serial.println("[CONFIG TX] Meta sent");
@@ -305,6 +318,7 @@ void processPendingConfigTransfer() {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
 
         Serial.printf(
             "[CONFIG TX] Chunk %u/%u | start=%u | data=%u | packet=%u\n",
@@ -333,6 +347,7 @@ void processPendingConfigTransfer() {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
         notifyEventJson(out);
 
         Serial.println("[CONFIG TX] End sent");
@@ -381,6 +396,7 @@ void processPendingConfigTransfer() {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
         notifyEventJson(out);
 
         Serial.println("[CONFIG TX] Meta sent");
@@ -413,6 +429,7 @@ void processPendingConfigTransfer() {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
 
         Serial.printf(
             "[CONFIG TX] Chunk %u/%u | start=%u | data=%u | packet=%u\n",
@@ -441,6 +458,7 @@ void processPendingConfigTransfer() {
 
         String out;
         serializeJson(doc, out);
+        doc.clear();
         notifyEventJson(out);
 
         Serial.println("[CONFIG TX] End sent");
@@ -455,13 +473,25 @@ void processPendingConfigTransfer() {
     uint16_t requestId,
     const TDocument& jsonDoc,
     bool partial)
+  {
+    notifyConfigJsonStreamChunked(target, entity, requestId, measureJson(jsonDoc),
+      [&](Print& out) { return serializeJson(jsonDoc, out) == measureJson(jsonDoc); }, partial);
+  }
+
+  template <typename TWriter>
+  bool notifyConfigJsonStreamChunked(
+    const char* target,
+    const char* entity,
+    uint16_t requestId,
+    size_t totalLen,
+    TWriter writer,
+    bool partial)
 {
     Serial.printf(
         "[CONFIG TX] BLE connected=%s\n",
         _clientConnected ? "YES" : "NO"
     );
 
-    const size_t totalLen = measureJson(jsonDoc);
     const size_t chunkSize = 80;
     const size_t chunkCount =
         (totalLen == 0)
@@ -488,8 +518,10 @@ void processPendingConfigTransfer() {
         doc["totalLength"] = totalLen;
         doc["chunkCount"] = chunkCount;
 
+        if (doc.overflowed()) return false;
         String out;
         serializeJson(doc, out);
+        doc.clear();
         notifyEventJson(out);
 
         Serial.println("[CONFIG TX] Meta sent");
@@ -516,16 +548,17 @@ void processPendingConfigTransfer() {
           _chunkDelayMs(delayMs) {}
 
       size_t write(uint8_t value) override {
+        if (_failed) return 0;
         _buffer[_bufferLen++] = static_cast<char>(value);
         if (_bufferLen >= ChunkSize) {
           flushChunk();
         }
-        return 1;
+        return _failed ? 0 : 1;
       }
 
       size_t write(const uint8_t* buffer, size_t size) override {
         for (size_t i = 0; i < size; ++i) {
-          write(buffer[i]);
+          if (!write(buffer[i])) return i;
         }
         return size;
       }
@@ -535,6 +568,8 @@ void processPendingConfigTransfer() {
           flushChunk();
         }
       }
+
+      bool valid(size_t expectedChunks) const { return !_failed && _chunkIndex == expectedChunks; }
 
     private:
       enum { ChunkSize = 80 };
@@ -549,6 +584,7 @@ void processPendingConfigTransfer() {
       char _buffer[ChunkSize + 1] = { 0 };
       size_t _bufferLen = 0;
       size_t _chunkIndex = 0;
+      bool _failed = false;
 
       void flushChunk() {
         if (_runtime == nullptr) {
@@ -568,8 +604,14 @@ void processPendingConfigTransfer() {
         doc["chunkCount"] = _chunkCount;
         doc["data"] = _buffer;
 
+        if (doc.overflowed()) {
+          _failed = true;
+          _bufferLen = 0;
+          return;
+        }
         String out;
         serializeJson(doc, out);
+        doc.clear();
 
         Serial.printf(
             "[CONFIG TX] Chunk %u/%u | data=%u | packet=%u\n",
@@ -598,8 +640,9 @@ void processPendingConfigTransfer() {
       chunkCount,
       chunkDelayMs);
 
-    serializeJson(jsonDoc, chunkPrint);
+    const bool written = writer(chunkPrint);
     chunkPrint.finish();
+    if (!written || !chunkPrint.valid(chunkCount)) return false;
 
     delay(endDelayMs);
     yield();
@@ -612,13 +655,16 @@ void processPendingConfigTransfer() {
         doc["entity"] = entity ? entity : "";
         doc["partial"] = partial;
 
+        if (doc.overflowed()) return false;
         String out;
         serializeJson(doc, out);
+        doc.clear();
         notifyEventJson(out);
 
         Serial.println("[CONFIG TX] End sent");
         Serial.println("========== CONFIG TRANSFER END ==========");
     }
+    return true;
 }
 
   ArmorLinkBleCommandHandler* commandHandler() {
@@ -674,11 +720,18 @@ private:
 
   void onCommandWritten(BLECharacteristic* characteristic) {
     String json = characteristic->getValue().c_str();
+    Serial.printf("[BLE][RX] write bytes=%u heap8=%u largestBlock8=%u\n",
+                  (unsigned)json.length(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     if (json.isEmpty()) return;
 
     StaticJsonDocument<1024> doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
+      Serial.printf("[BLE][RX] JSON decode failed: %s heap=%u largestBlock=%u\n",
+                    err.c_str(), (unsigned)ESP.getFreeHeap(),
+                    (unsigned)ESP.getMaxAllocHeap());
+      doc.clear();
       StaticJsonDocument<256> outDoc;
       outDoc["type"] = "error";
       outDoc["message"] = "Invalid JSON";
@@ -686,23 +739,29 @@ private:
 
       String out;
       serializeJson(outDoc, out);
+      outDoc.clear();
       notifyEventJson(out);
       return;
     }
 
     if (!_commandHandler) {
+      doc.clear();
       StaticJsonDocument<192> outDoc;
       outDoc["type"] = "error";
       outDoc["message"] = "No command handler registered";
 
       String out;
       serializeJson(outDoc, out);
+      outDoc.clear();
       notifyEventJson(out);
       return;
     }
 
     armorLinkPacketFromJsonDocument(doc, _commandHandler->packet);
     _commandHandler->rawJson = json;
+    // Packet fields and rawJson own their data. Release the incoming JSON's
+    // heap pool before the handler allocates any response documents.
+    doc.clear();
     Serial.printf(
       "[BLE][RX] type=%u requestId=%u source=%s target=%s entity=%s command=%s payloadLen=%u rawLen=%u\n",
       _commandHandler->packet.msgType,
@@ -848,11 +907,13 @@ bool onConfirmPIN(uint32_t pass_key) override {
 
     if (cmpl.success) {
 
-      AL_VERBOSELN("?? BLE Authentifizierung erfolgreich");
+      Serial.printf("[BLE] Authentication successful: authMode=0x%02x\n",
+                    (unsigned)cmpl.auth_mode);
 
     } else {
 
-      AL_VERBOSELN("? BLE Authentifizierung fehlgeschlagen");
+      Serial.printf("[BLE] Authentication failed: reason=0x%02x\n",
+                    (unsigned)cmpl.fail_reason);
 
     }
 

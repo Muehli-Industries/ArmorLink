@@ -71,6 +71,17 @@ public:
     return true;
   }
 
+  static bool measureBle(const ArmorLinkModule& module, size_t& length) {
+    ArmorLinkDescriptorCountingPrint counter;
+    const bool ok = writeDocumentStreaming(module, counter, Profile::Ble);
+    length = ok ? counter.length() : 0;
+    return ok;
+  }
+
+  static bool writeBle(const ArmorLinkModule& module, Print& out) {
+    return writeDocumentStreaming(module, out, Profile::Ble);
+  }
+
   static bool measure(const ArmorLinkModule& module, size_t& length) {
     return measureWebSerial(module, length);
   }
@@ -189,6 +200,10 @@ private:
                                      Print& out,
                                      Profile profile) {
     const bool isWebSerial = profile == Profile::WebSerial;
+    const bool hasBuilderSurface = hasActionBuilderSurface(module);
+    const bool hasBuilderDescriptor =
+        isWebSerial &&
+        (hasBuilderSurface || module.actions().items().size() > 0);
 
     out.print('{');
     bool first = true;
@@ -197,8 +212,18 @@ private:
     writeStringProperty(out, first, "name", module.name());
     writeStringProperty(out, first, "moduleVersion", module.version());
     writeStringProperty(out, first, "armorLinkVersion", ARMORLINK_VERSION);
+    if (isWebSerial) {
+      writeStringProperty(out, first, "chipId", buildChipId());
+      writeStringProperty(out, first, "espChipModel", String(ESP.getChipModel()));
+      writeIntProperty(out, first, "espChipRevision", ESP.getChipRevision());
+      writeIntProperty(out, first, "espChipCores", ESP.getChipCores());
+      writeStringProperty(out, first, "espSdkVersion", String(ESP.getSdkVersion()));
+    }
 
     if (isWebSerial && !module.profileName().isEmpty()) {
+      if (!module.profileIdentifier().isEmpty()) {
+        writeStringProperty(out, first, "profileIdentifier", module.profileIdentifier());
+      }
       writeStringProperty(out, first, "profileName", module.profileName());
       writeStringProperty(out, first, "activeProfileName", module.profileName());
       writeStringProperty(
@@ -216,9 +241,8 @@ private:
     writeBoolProperty(out, first, "supportsConfigSet", true);
     if (isWebSerial) {
       writeBoolProperty(out, first, "supportsActionBuilder",
-                        module.actionBuilder().components().size() > 0 ||
-                        module.actions().items().size() > 0 ||
-                        module.actionBuilder().customActions().size() > 0);
+                        hasBuilderSurface ||
+                        module.actions().items().size() > 0);
     }
     writeStringProperty(out, first, "moduleType", moduleTypeToString(module.type()));
 
@@ -226,7 +250,7 @@ private:
       writeStringProperty(out, first, "profileTarget", module.profileTarget());
     }
 
-    if (isWebSerial) {
+    if (hasBuilderDescriptor) {
       writePropertyName(out, first, "actionComponents");
       writeActionComponentsStreaming(module, out);
 
@@ -289,26 +313,33 @@ private:
       }
     }
 
-    if (isWebSerial) {
-      for (const auto& action : module.actionBuilder().customActions()) {
-        const String actionSection =
-            action.section.isEmpty() ? String("Actions") : action.section;
+    for (const auto& action : module.actionBuilder().customActions()) {
+      const String actionSection =
+          action.section.isEmpty() ? String("Actions") : action.section;
 
-        bool found = false;
-        for (const auto& existing : orderedSections) {
-          if (normalizeId(existing) == normalizeId(actionSection)) {
-            found = true;
-            break;
-          }
+      bool found = false;
+      for (const auto& existing : orderedSections) {
+        if (normalizeId(existing) == normalizeId(actionSection)) {
+          found = true;
+          break;
         }
+      }
 
-        if (!found) {
-          orderedSections.push_back(actionSection);
-        }
+      if (!found) {
+        orderedSections.push_back(actionSection);
       }
     }
 
     if (isWebSerial && hasArmorLinkSection) {
+      // System actions may already have registered this section. Move it to
+      // the front instead of emitting the same fields and actions twice.
+      for (auto it = orderedSections.begin(); it != orderedSections.end();) {
+        if (normalizeId(*it) == normalizeId("ArmorLink")) {
+          it = orderedSections.erase(it);
+        } else {
+          ++it;
+        }
+      }
       orderedSections.insert(orderedSections.begin(), "ArmorLink");
     }
 
@@ -515,7 +546,6 @@ private:
                                     Print& out,
                                     Profile profile,
                                     const String& sectionName) {
-    const bool isWebSerial = profile == Profile::WebSerial;
     bool firstAction = true;
 
     for (const auto& action : module.actions().items()) {
@@ -532,12 +562,8 @@ private:
       firstAction = false;
 
       out.print('{');
-      appendActionStreaming(action, out, profile);
+      appendActionStreaming(action, out, profile, false);
       out.print('}');
-    }
-
-    if (!isWebSerial) {
-      return;
     }
 
     for (const auto& action : module.actionBuilder().customActions()) {
@@ -554,14 +580,15 @@ private:
       firstAction = false;
 
       out.print('{');
-      appendActionStreaming(action, out, profile);
+      appendActionStreaming(action, out, profile, true);
       out.print('}');
     }
   }
 
   static void appendActionStreaming(const ArmorLinkActionDef& action,
                                     Print& out,
-                                    Profile profile) {
+                                    Profile profile,
+                                    bool isCustomAction = false) {
     const bool isWebSerial = profile == Profile::WebSerial;
     bool first = true;
 
@@ -580,6 +607,11 @@ private:
 
     if (isWebSerial && action.advanced) {
       writeBoolProperty(out, first, "advanced", true);
+    }
+
+    if (isWebSerial) {
+      writeBoolProperty(out, first, "custom", isCustomAction);
+      writeBoolProperty(out, first, "editableInWeb", isCustomAction);
     }
 
     if (isWebSerial && !action.description.isEmpty()) {
@@ -608,12 +640,78 @@ private:
       writeStringProperty(out, first, "label", component.label);
       writeStringProperty(out, first, "kind",
                           actionComponentKindToString(component.kind));
+      writeBoolProperty(out, first, "custom", component.custom);
+      writeBoolProperty(out, first, "editableInWeb", component.custom);
       if (!component.section.isEmpty()) {
         writeStringProperty(out, first, "section", component.section);
       }
       if (component.kind == ArmorLinkActionComponentKind::State) {
         writeBoolProperty(out, first, "defaultValue", component.defaultValue);
         writeBoolProperty(out, first, "value", component.ready);
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Servo &&
+          component.hasServoConfig) {
+        writeIntProperty(out, first, "pin", component.servoPin);
+        writeIntProperty(out, first, "openPosition", component.servoOpenPosition);
+        writeIntProperty(out, first, "closedPosition", component.servoClosedPosition);
+        writeIntProperty(out, first, "minPulseUs", component.servoMinPulseUs);
+        writeIntProperty(out, first, "maxPulseUs", component.servoMaxPulseUs);
+        if (!component.servoProfile.isEmpty()) {
+          writeStringProperty(out, first, "servoProfile", component.servoProfile);
+        }
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Led &&
+          component.hasLedConfig) {
+        writeIntProperty(out, first, "ledPin", component.ledPin);
+        writeIntProperty(out, first, "ledCount", component.ledCount);
+        writeIntProperty(out, first, "ledStartIndex", component.ledStartIndex);
+        writeIntProperty(out, first, "ledBrightness", component.ledBrightness);
+        writeStringProperty(out, first, "ledChipset", component.ledChipset);
+        writeStringProperty(out, first, "ledColorOrder", component.ledColorOrder);
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Gpio &&
+          component.hasGpioConfig) {
+        writeIntProperty(out, first, "gpioPin", component.gpioPin);
+        writeStringProperty(out, first, "gpioMode", component.gpioMode);
+        writeBoolProperty(out, first, "gpioDefaultLevel", component.gpioDefaultLevel);
+        writeBoolProperty(out, first, "gpioActiveLow", component.gpioActiveLow);
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Button &&
+          component.hasButtonConfig) {
+        writeIntProperty(out, first, "buttonPin", component.buttonPin);
+        writeBoolProperty(out, first, "buttonActiveLow", component.buttonActiveLow);
+        writeIntProperty(out, first, "buttonDebounceMs", component.buttonDebounceMs);
+        writeIntProperty(out, first, "buttonMultiGapMs", component.buttonMultiGapMs);
+        writeIntProperty(out, first, "buttonLongPressMs", component.buttonLongPressMs);
+
+        if (!component.buttonEvents.empty()) {
+          if (!first) {
+            out.print(',');
+          }
+          first = false;
+          out.print("\"buttonEvents\":[");
+
+          bool firstRoute = true;
+          for (const auto& route : component.buttonEvents) {
+            if (!firstRoute) {
+              out.print(',');
+            }
+            firstRoute = false;
+
+            bool firstRouteProperty = true;
+            out.print('{');
+            writeStringProperty(out, firstRouteProperty, "event", route.event);
+            writeStringProperty(out, firstRouteProperty, "mode", route.mode);
+            writeBoolProperty(out, firstRouteProperty, "enabled", route.enabled);
+            writeStringProperty(out, firstRouteProperty, "action", route.action);
+            writeStringProperty(out, firstRouteProperty, "target", route.target);
+            writeStringProperty(out, firstRouteProperty, "entity", route.entity);
+            writeStringProperty(out, firstRouteProperty, "command", route.command);
+            out.print('}');
+          }
+
+          out.print(']');
+        }
       }
       out.print('}');
     }
@@ -658,6 +756,22 @@ private:
         if (op.code == ArmorLinkActionOpCode::Wait ||
             op.code == ArmorLinkActionOpCode::WaitUntilState) {
           writeIntProperty(out, firstOpProperty, "durationMs", op.argument);
+        }
+        if (op.code == ArmorLinkActionOpCode::ServoMoveTo) {
+          writeIntProperty(out, firstOpProperty, "position", op.argument);
+          writeIntProperty(out, firstOpProperty, "durationMs", op.durationMs);
+          writeStringProperty(out, firstOpProperty, "easing", op.option == 1 ? "easeIn" : op.option == 2 ? "easeOut" : op.option == 3 ? "easeInOut" : "linear");
+        }
+        if (op.code == ArmorLinkActionOpCode::LedSetColor) {
+          char color[8]; snprintf(color, sizeof(color), "#%06lX", static_cast<unsigned long>(op.color & 0xFFFFFF));
+          writeStringProperty(out, firstOpProperty, "color", color);
+        }
+        if (op.code == ArmorLinkActionOpCode::LedSetBrightness) {
+          writeIntProperty(out, firstOpProperty, "brightness", op.intensity);
+        }
+        if (op.code == ArmorLinkActionOpCode::LedAnimation) {
+          writeStringProperty(out, firstOpProperty, "animation", op.option == 1 ? "pulse" : op.option == 2 ? "blink" : op.option == 3 ? "chase" : op.option == 4 ? "solid" : "rainbow");
+          writeIntProperty(out, firstOpProperty, "durationMs", op.durationMs);
         }
         if (op.code == ArmorLinkActionOpCode::StateSet) {
           writeBoolProperty(out, firstOpProperty, "value", op.value);
@@ -814,92 +928,34 @@ private:
     out.print('"');
   }
 
+  class ArmorLinkDescriptorStringPrint : public Print {
+  public:
+    explicit ArmorLinkDescriptorStringPrint(String& value) : _value(value) {}
+    size_t write(uint8_t value) override {
+      if (!_value.concat(static_cast<char>(value))) {
+        _failed = true;
+        return 0;
+      }
+      return 1;
+    }
+    bool failed() const { return _failed; }
+  private:
+    String& _value;
+    bool _failed = false;
+  };
+
   static String buildWithProfile(const ArmorLinkModule& module,
                                  Profile profile,
-                                 size_t jsonCapacity) {
-    if (profile == Profile::Ble) {
-      size_t measuredLength = 0;
-
-      {
-        DynamicJsonDocument doc(jsonCapacity);
-        if (!populateDocument(module, doc, Profile::Ble)) {
-          return "";
-        }
-
-        measuredLength = measureJson(doc);
-      }
-
-      if (measuredLength + 1 > CompactDescriptorStringReserve) {
-        Serial.printf(
-            "[DESCRIPTOR] BLE JSON reserve too small (%u of %u bytes)\n",
-            static_cast<unsigned>(measuredLength),
-            static_cast<unsigned>(CompactDescriptorStringReserve));
-        return "";
-      }
-
-      String json;
-      if (!json.reserve(measuredLength + 1)) {
-        Serial.printf(
-            "[DESCRIPTOR] BLE JSON reserve failed (%u bytes)\n",
-            static_cast<unsigned>(measuredLength + 1));
-        return "";
-      }
-
-      DynamicJsonDocument doc(jsonCapacity);
-      if (!populateDocument(module, doc, Profile::Ble)) {
-        return "";
-      }
-
-      serializeJson(doc, json);
-
-      if (json.length() != measuredLength) {
-        Serial.printf(
-            "[DESCRIPTOR] JSON serialization incomplete (%u of %u bytes, profile=ble)\n",
-            static_cast<unsigned>(json.length()),
-            static_cast<unsigned>(measuredLength));
-        return "";
-      }
-
-      return json;
-    }
-
-    size_t measuredLength = 0;
-
-    {
-      DynamicJsonDocument doc(jsonCapacity);
-
-      if (!populateDocument(module, doc, profile)) {
-        return "";
-      }
-
-      measuredLength = measureJson(doc);
-    }
-
+                                 size_t /* jsonCapacity */) {
+    // Serialize directly without allocating the full JSON object tree, which
+    // can exhaust a fragmented heap even for a small serialized descriptor.
     String json;
-    if (!json.reserve(measuredLength + 1)) {
-      Serial.printf(
-          "[DESCRIPTOR] JSON string allocation failed (%u bytes, profile=%s)\n",
-          static_cast<unsigned>(measuredLength),
-          profileName(profile));
+    ArmorLinkDescriptorStringPrint out(json);
+    if (!writeDocumentStreaming(module, out, profile) || out.failed()) {
+      Serial.printf("[DESCRIPTOR] JSON streaming failed (profile=%s)\n",
+                    profileName(profile));
       return "";
     }
-
-    DynamicJsonDocument doc(jsonCapacity);
-    if (!populateDocument(module, doc, profile)) {
-      return "";
-    }
-
-    serializeJson(doc, json);
-
-    if (json.length() != measuredLength) {
-      Serial.printf(
-          "[DESCRIPTOR] JSON serialization incomplete (%u of %u bytes, profile=%s)\n",
-          static_cast<unsigned>(json.length()),
-          static_cast<unsigned>(measuredLength),
-          profileName(profile));
-      return "";
-    }
-
     return json;
   }
 
@@ -914,7 +970,17 @@ private:
     doc["name"] = module.name();
     doc["moduleVersion"] = module.version();
     doc["armorLinkVersion"] = ARMORLINK_VERSION;
+    if (isWebSerial) {
+      doc["chipId"] = buildChipId();
+      doc["espChipModel"] = String(ESP.getChipModel());
+      doc["espChipRevision"] = ESP.getChipRevision();
+      doc["espChipCores"] = ESP.getChipCores();
+      doc["espSdkVersion"] = String(ESP.getSdkVersion());
+    }
     if (isWebSerial && !module.profileName().isEmpty()) {
+      if (!module.profileIdentifier().isEmpty()) {
+        doc["profileIdentifier"] = module.profileIdentifier();
+      }
       doc["profileName"] = module.profileName();
       doc["activeProfileName"] = module.profileName();
       doc["profileNameSource"] = module.profileNameImported()
@@ -924,19 +990,22 @@ private:
     if (isWebSerial && !module.defaultProfileName().isEmpty()) {
       doc["defaultProfileName"] = module.defaultProfileName();
     }
+    const bool hasBuilderSurface = hasActionBuilderSurface(module);
+    const bool hasBuilderDescriptor =
+        isWebSerial &&
+        (hasBuilderSurface || module.actions().items().size() > 0);
     doc["supportsPartialConfigGet"] = false;
     doc["supportsConfigSet"] = true;
     if (isWebSerial) {
       doc["supportsActionBuilder"] =
-          module.actionBuilder().components().size() > 0 ||
-          module.actions().items().size() > 0 ||
-          module.actionBuilder().customActions().size() > 0;
+          hasBuilderSurface ||
+          module.actions().items().size() > 0;
     }
     doc["moduleType"] = moduleTypeToString(module.type());
     if (isWebSerial && !module.profileTarget().isEmpty()) {
       doc["profileTarget"] = module.profileTarget();
     }
-    if (isWebSerial) {
+    if (hasBuilderDescriptor) {
       JsonArray actionComponents =
           doc.createNestedArray("actionComponents");
       appendActionComponents(module, actionComponents);
@@ -968,6 +1037,12 @@ private:
       default:
         return "ble";
     }
+  }
+
+  static bool hasActionBuilderSurface(const ArmorLinkModule& module) {
+    return module.actionBuilder().components().size() > 0 ||
+           module.actionBuilder().definitions().size() > 0 ||
+           module.actionBuilder().customActions().size() > 0;
   }
 
   static const char* moduleTypeToString(ArmorLinkModuleType type) {
@@ -1013,6 +1088,7 @@ private:
       case ArmorLinkActionComponentKind::Servo: return "servo";
       case ArmorLinkActionComponentKind::Led: return "led";
       case ArmorLinkActionComponentKind::Gpio: return "gpio";
+      case ArmorLinkActionComponentKind::Button: return "button";
       case ArmorLinkActionComponentKind::State: return "state";
       default: return "gpio";
     }
@@ -1022,8 +1098,12 @@ private:
     switch (op) {
       case ArmorLinkActionOpCode::ServoOpen: return "servo_open";
       case ArmorLinkActionOpCode::ServoClose: return "servo_close";
+      case ArmorLinkActionOpCode::ServoMoveTo: return "servo_move_to";
       case ArmorLinkActionOpCode::LedOn: return "led_on";
       case ArmorLinkActionOpCode::LedOff: return "led_off";
+      case ArmorLinkActionOpCode::LedSetColor: return "led_set_color";
+      case ArmorLinkActionOpCode::LedSetBrightness: return "led_set_brightness";
+      case ArmorLinkActionOpCode::LedAnimation: return "led_animation";
       case ArmorLinkActionOpCode::Wait: return "wait";
       case ArmorLinkActionOpCode::GpioHigh: return "gpio_high";
       case ArmorLinkActionOpCode::GpioLow: return "gpio_low";
@@ -1044,12 +1124,61 @@ private:
       out["id"] = component.id;
       out["label"] = component.label;
       out["kind"] = actionComponentKindToString(component.kind);
+      out["custom"] = component.custom;
+      out["editableInWeb"] = component.custom;
       if (!component.section.isEmpty()) {
         out["section"] = component.section;
       }
       if (component.kind == ArmorLinkActionComponentKind::State) {
         out["defaultValue"] = component.defaultValue;
         out["value"] = component.ready;
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Servo &&
+          component.hasServoConfig) {
+        out["pin"] = component.servoPin;
+        out["openPosition"] = component.servoOpenPosition;
+        out["closedPosition"] = component.servoClosedPosition;
+        out["minPulseUs"] = component.servoMinPulseUs;
+        out["maxPulseUs"] = component.servoMaxPulseUs;
+        if (!component.servoProfile.isEmpty()) {
+          out["servoProfile"] = component.servoProfile;
+        }
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Led &&
+          component.hasLedConfig) {
+        out["ledPin"] = component.ledPin;
+        out["ledCount"] = component.ledCount;
+        out["ledStartIndex"] = component.ledStartIndex;
+        out["ledBrightness"] = component.ledBrightness;
+        out["ledChipset"] = component.ledChipset;
+        out["ledColorOrder"] = component.ledColorOrder;
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Gpio &&
+          component.hasGpioConfig) {
+        out["gpioPin"] = component.gpioPin;
+        out["gpioMode"] = component.gpioMode;
+        out["gpioDefaultLevel"] = component.gpioDefaultLevel;
+        out["gpioActiveLow"] = component.gpioActiveLow;
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Button &&
+          component.hasButtonConfig) {
+        out["buttonPin"] = component.buttonPin;
+        out["buttonActiveLow"] = component.buttonActiveLow;
+        out["buttonDebounceMs"] = component.buttonDebounceMs;
+        out["buttonMultiGapMs"] = component.buttonMultiGapMs;
+        out["buttonLongPressMs"] = component.buttonLongPressMs;
+
+        JsonArray buttonEvents = out.createNestedArray("buttonEvents");
+        for (const auto& route : component.buttonEvents) {
+          JsonObject routeJson = buttonEvents.createNestedObject();
+          routeJson["event"] = route.event;
+          routeJson["mode"] = route.mode;
+          routeJson["enabled"] = route.enabled;
+          routeJson["action"] = route.action;
+          routeJson["target"] = route.target;
+          routeJson["entity"] = route.entity;
+          routeJson["command"] = route.command;
+        }
       }
     }
   }
@@ -1076,6 +1205,20 @@ private:
         if (op.code == ArmorLinkActionOpCode::Wait ||
             op.code == ArmorLinkActionOpCode::WaitUntilState) {
           opOut["durationMs"] = op.argument;
+        }
+        if (op.code == ArmorLinkActionOpCode::ServoMoveTo) {
+          opOut["position"] = op.argument;
+          opOut["durationMs"] = op.durationMs;
+          opOut["easing"] = op.option == 1 ? "easeIn" : op.option == 2 ? "easeOut" : op.option == 3 ? "easeInOut" : "linear";
+        }
+        if (op.code == ArmorLinkActionOpCode::LedSetColor) {
+          char color[8]; snprintf(color, sizeof(color), "#%06lX", static_cast<unsigned long>(op.color & 0xFFFFFF));
+          opOut["color"] = color;
+        }
+        if (op.code == ArmorLinkActionOpCode::LedSetBrightness) opOut["brightness"] = op.intensity;
+        if (op.code == ArmorLinkActionOpCode::LedAnimation) {
+          opOut["animation"] = op.option == 1 ? "pulse" : op.option == 2 ? "blink" : op.option == 3 ? "chase" : op.option == 4 ? "solid" : "rainbow";
+          opOut["durationMs"] = op.durationMs;
         }
         if (op.code == ArmorLinkActionOpCode::StateSet) {
           opOut["value"] = op.value;
@@ -1168,6 +1311,15 @@ private:
     }
 
     if (isWebSerial && hasArmorLinkSection) {
+      // System actions may already have registered this section. Move it to
+      // the front instead of emitting the same fields and actions twice.
+      for (auto it = orderedSections.begin(); it != orderedSections.end();) {
+        if (normalizeId(*it) == normalizeId("ArmorLink")) {
+          it = orderedSections.erase(it);
+        } else {
+          ++it;
+        }
+      }
       orderedSections.insert(orderedSections.begin(), "ArmorLink");
     }
 
@@ -1317,7 +1469,7 @@ private:
         }
 
         JsonObject out = actions.createNestedObject();
-        appendAction(action, out, profile);
+        appendAction(action, out, profile, false);
       }
 
       for (const auto& action : module.actionBuilder().customActions()) {
@@ -1329,12 +1481,16 @@ private:
         }
 
         JsonObject out = actions.createNestedObject();
-        appendAction(action, out, profile);
+        appendAction(action, out, profile, true);
       }
     }
   }
 
-  static void appendAction(const ArmorLinkActionDef& action, JsonObject out, Profile profile) {
+  static void appendAction(
+      const ArmorLinkActionDef& action,
+      JsonObject out,
+      Profile profile,
+      bool isCustomAction = false) {
     const bool isWebSerial = profile == Profile::WebSerial;
     out["id"] = action.id;
     out["label"] = action.label;
@@ -1351,6 +1507,11 @@ private:
 
     if (isWebSerial && action.advanced) {
       out["advanced"] = true;
+    }
+
+    if (isWebSerial) {
+      out["custom"] = isCustomAction;
+      out["editableInWeb"] = isCustomAction;
     }
 
     if (isWebSerial && !action.description.isEmpty()) {
@@ -1380,5 +1541,17 @@ private:
     }
 
     return result;
+  }
+
+  static String buildChipId() {
+    const uint64_t chipId = ESP.getEfuseMac();
+    char uniqueId[18] = { 0 };
+    snprintf(
+        uniqueId,
+        sizeof(uniqueId),
+        "%04X%08X",
+        static_cast<uint16_t>(chipId >> 32),
+        static_cast<uint32_t>(chipId));
+    return String(uniqueId);
   }
 };

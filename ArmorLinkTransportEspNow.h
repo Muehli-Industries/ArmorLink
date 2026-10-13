@@ -23,6 +23,10 @@ using ArmorLinkManagedSendFn = void (*)(const uint8_t* mac_addr, esp_now_send_st
 
 class ArmorLinkPeerRegistry {
 public:
+  void removePeer(const String& name) {
+    if (!name.isEmpty()) _peers.erase(name);
+  }
+
   void registerPeer(const String& name, const uint8_t mac[6]) {
     MacAddress addr{};
     memcpy(addr.bytes, mac, 6);
@@ -54,7 +58,11 @@ private:
 
 class ArmorLinkTransportEspNow {
 public:
-  static constexpr size_t DEFAULT_QUEUE_SIZE = 64;
+#ifndef ARMORLINK_ESPNOW_QUEUE_SIZE
+#define ARMORLINK_ESPNOW_QUEUE_SIZE 64
+#endif
+  static constexpr size_t DEFAULT_QUEUE_SIZE = ARMORLINK_ESPNOW_QUEUE_SIZE;
+  static_assert(DEFAULT_QUEUE_SIZE >= 2, "ESP-NOW queue needs at least two slots");
   static constexpr uint16_t CONFIG_META_SETTLE_DELAY_MS = 200;
   static constexpr uint16_t CONFIG_CHUNK_DELAY_MS = 100;
   static constexpr uint16_t CONFIG_TRANSFER_CHUNK_DATA_SIZE = 140;

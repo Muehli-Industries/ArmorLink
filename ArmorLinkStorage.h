@@ -283,6 +283,21 @@ static String sanitizeKey(const String& input) {
     return true;
   }
 
+  bool loadProfileIdentifier(String& outIdentifier) {
+    if (_namespace.isEmpty()) {
+      return false;
+    }
+
+    Preferences prefs;
+    if (!prefs.begin(_namespace.c_str(), true)) {
+      return false;
+    }
+
+    outIdentifier = prefs.getString("profile_id", "");
+    prefs.end();
+    return true;
+  }
+
   bool saveProfileName(const String& name) {
     if (_namespace.isEmpty()) {
       return false;
@@ -293,6 +308,24 @@ static String sanitizeKey(const String& input) {
       return false;
     }
 
+    prefs.putString("profile_name", name);
+    prefs.end();
+    return true;
+  }
+
+  bool saveProfileMetadata(
+      const String& identifier,
+      const String& name) {
+    if (_namespace.isEmpty()) {
+      return false;
+    }
+
+    Preferences prefs;
+    if (!prefs.begin(_namespace.c_str(), false)) {
+      return false;
+    }
+
+    prefs.putString("profile_id", identifier);
     prefs.putString("profile_name", name);
     prefs.end();
     return true;
@@ -348,11 +381,20 @@ static String sanitizeKey(const String& input) {
       const int secondSep = firstSep < 0 ? -1 : line.indexOf('|', firstSep + 1);
       const int thirdSep = secondSep < 0 ? -1 : line.indexOf('|', secondSep + 1);
       const int fourthSep = thirdSep < 0 ? -1 : line.indexOf('|', thirdSep + 1);
+      const int fifthSep = fourthSep < 0 ? -1 : line.indexOf('|', fourthSep + 1);
+      const int sixthSep = fifthSep < 0 ? -1 : line.indexOf('|', fifthSep + 1);
+      const int seventhSep = sixthSep < 0 ? -1 : line.indexOf('|', sixthSep + 1);
+      const int eighthSep = seventhSep < 0 ? -1 : line.indexOf('|', seventhSep + 1);
+      const int ninthSep = eighthSep < 0 ? -1 : line.indexOf('|', eighthSep + 1);
+      const int tenthSep = ninthSep < 0 ? -1 : line.indexOf('|', ninthSep + 1);
 
       if (firstSep > 0 && secondSep > firstSep) {
-        module.actionBuilder().upsertCustomComponent(
+        const ArmorLinkActionComponentKind kind =
+            actionComponentKindFromString(line.substring(firstSep + 1, secondSep));
+        ArmorLinkActionComponentDef& component =
+            module.actionBuilder().upsertCustomComponent(
             line.substring(0, firstSep),
-            actionComponentKindFromString(line.substring(firstSep + 1, secondSep)),
+            kind,
             thirdSep > secondSep
                 ? line.substring(secondSep + 1, thirdSep)
                 : line.substring(secondSep + 1),
@@ -362,7 +404,111 @@ static String sanitizeKey(const String& input) {
                     : line.substring(thirdSep + 1))
                 : String("Actions"),
             fourthSep > thirdSep &&
-                line.substring(fourthSep + 1).equals("1"));
+                (fifthSep > fourthSep
+                    ? line.substring(fourthSep + 1, fifthSep)
+                    : line.substring(fourthSep + 1)).equals("1"));
+
+        if (fifthSep > fourthSep && tenthSep > ninthSep &&
+            kind == ArmorLinkActionComponentKind::Servo) {
+          module.actionBuilder().setServoConfig(
+              component,
+              line.substring(fifthSep + 1, sixthSep).toInt(),
+              line.substring(sixthSep + 1, seventhSep).toInt(),
+              line.substring(seventhSep + 1, eighthSep).toInt(),
+              line.substring(eighthSep + 1, ninthSep).toInt(),
+              line.substring(ninthSep + 1, tenthSep).toInt(),
+              line.substring(tenthSep + 1));
+        }
+
+        if (fifthSep > fourthSep && tenthSep > ninthSep &&
+            kind == ArmorLinkActionComponentKind::Led) {
+          module.actionBuilder().setLedConfig(
+              component,
+              line.substring(fifthSep + 1, sixthSep).toInt(),
+              line.substring(sixthSep + 1, seventhSep).toInt(),
+              line.substring(seventhSep + 1, eighthSep).toInt(),
+              line.substring(eighthSep + 1, ninthSep).toInt(),
+              line.substring(ninthSep + 1, tenthSep),
+              line.substring(tenthSep + 1));
+        }
+
+        if (fifthSep > fourthSep && eighthSep > seventhSep &&
+            kind == ArmorLinkActionComponentKind::Gpio) {
+          module.actionBuilder().setGpioConfig(
+              component,
+              line.substring(fifthSep + 1, sixthSep).toInt(),
+              line.substring(sixthSep + 1, seventhSep),
+              line.substring(seventhSep + 1, eighthSep).equals("1"),
+              eighthSep > seventhSep &&
+                  (ninthSep > eighthSep
+                      ? line.substring(eighthSep + 1, ninthSep)
+                      : line.substring(eighthSep + 1)).equals("1"));
+        }
+
+        if (fifthSep > fourthSep && tenthSep > ninthSep &&
+            kind == ArmorLinkActionComponentKind::Button) {
+          module.actionBuilder().setButtonConfig(
+              component,
+              line.substring(fifthSep + 1, sixthSep).toInt(),
+              line.substring(sixthSep + 1, seventhSep).equals("1"),
+              line.substring(seventhSep + 1, eighthSep).toInt(),
+              line.substring(eighthSep + 1, ninthSep).toInt(),
+              line.substring(ninthSep + 1, tenthSep).toInt());
+          module.actionBuilder().clearButtonEventRoutes(component);
+
+          int routeStart = tenthSep + 1;
+          while (routeStart < static_cast<int>(line.length())) {
+            const int routeEnd = line.indexOf(';', routeStart);
+            const String route =
+                routeEnd < 0
+                    ? line.substring(routeStart)
+                    : line.substring(routeStart, routeEnd);
+
+            const int firstRouteSep = route.indexOf('~');
+            const int secondRouteSep =
+                firstRouteSep < 0 ? -1 : route.indexOf('~', firstRouteSep + 1);
+            const int thirdRouteSep =
+                secondRouteSep < 0 ? -1 : route.indexOf('~', secondRouteSep + 1);
+            const int fourthRouteSep =
+                thirdRouteSep < 0 ? -1 : route.indexOf('~', thirdRouteSep + 1);
+            const int fifthRouteSep =
+                fourthRouteSep < 0 ? -1 : route.indexOf('~', fourthRouteSep + 1);
+            const int sixthRouteSep =
+                fifthRouteSep < 0 ? -1 : route.indexOf('~', fifthRouteSep + 1);
+
+            if (firstRouteSep > 0 &&
+                secondRouteSep > firstRouteSep &&
+                thirdRouteSep > secondRouteSep &&
+                fourthRouteSep > thirdRouteSep &&
+                fifthRouteSep > fourthRouteSep) {
+              const bool hasEnabledField = sixthRouteSep > fifthRouteSep;
+              module.actionBuilder().addButtonEventRoute(
+                  component,
+                  route.substring(0, firstRouteSep),
+                  route.substring(firstRouteSep + 1, secondRouteSep),
+                  hasEnabledField
+                      ? route.substring(secondRouteSep + 1, thirdRouteSep).equals("1")
+                      : true,
+                  hasEnabledField
+                      ? route.substring(thirdRouteSep + 1, fourthRouteSep)
+                      : route.substring(secondRouteSep + 1, thirdRouteSep),
+                  hasEnabledField
+                      ? route.substring(fourthRouteSep + 1, fifthRouteSep)
+                      : route.substring(thirdRouteSep + 1, fourthRouteSep),
+                  hasEnabledField
+                      ? route.substring(fifthRouteSep + 1, sixthRouteSep)
+                      : route.substring(fourthRouteSep + 1, fifthRouteSep),
+                  hasEnabledField
+                      ? route.substring(sixthRouteSep + 1)
+                      : route.substring(fifthRouteSep + 1));
+            }
+
+            if (routeEnd < 0) {
+              break;
+            }
+            routeStart = routeEnd + 1;
+          }
+        }
       }
 
       if (end < 0) {
@@ -424,7 +570,8 @@ static String sanitizeKey(const String& input) {
     }
 
     std::vector<uint8_t> data;
-    data.reserve(1 + definition.ops.size() * 5);
+    data.reserve(2 + definition.ops.size() * 13);
+    data.push_back(0xA2);
     data.push_back(static_cast<uint8_t>(definition.ops.size()));
 
     for (const auto& op : definition.ops) {
@@ -433,6 +580,14 @@ static String sanitizeKey(const String& input) {
       data.push_back(static_cast<uint8_t>(op.argument & 0xFF));
       data.push_back(static_cast<uint8_t>((op.argument >> 8) & 0xFF));
       data.push_back(op.value ? 1 : 0);
+      data.push_back(static_cast<uint8_t>(op.durationMs & 0xFF));
+      data.push_back(static_cast<uint8_t>((op.durationMs >> 8) & 0xFF));
+      data.push_back(static_cast<uint8_t>(op.color & 0xFF));
+      data.push_back(static_cast<uint8_t>((op.color >> 8) & 0xFF));
+      data.push_back(static_cast<uint8_t>((op.color >> 16) & 0xFF));
+      data.push_back(static_cast<uint8_t>((op.color >> 24) & 0xFF));
+      data.push_back(op.option);
+      data.push_back(op.intensity);
     }
 
     Preferences prefs;
@@ -471,9 +626,47 @@ static String sanitizeKey(const String& input) {
     return true;
   }
 
+  bool deleteActionDefinition(
+      const String& entity,
+      const String& command) {
+    if (_namespace.isEmpty() || entity.isEmpty() || command.isEmpty()) {
+      return false;
+    }
+
+    const String storageKey =
+        sanitizeKey(String("act_") + entity + "_" + command);
+
+    if (storageKey.isEmpty()) {
+      return false;
+    }
+
+    Preferences prefs;
+    if (!prefs.begin(_namespace.c_str(), false)) {
+      return false;
+    }
+
+    prefs.remove(storageKey.c_str());
+    removeCustomActionListEntry(prefs, entity, command);
+    prefs.end();
+    return true;
+  }
+
+  bool deleteActionComponent(
+      const ArmorLinkActionBuilderRuntime& runtime) {
+    return saveActionComponents(runtime);
+  }
+
   bool clearPairingInfo() {
-    ArmorLinkPairingInfo empty{};
-    return savePairingInfo(empty);
+    if (_namespace.isEmpty()) return false;
+    Preferences prefs;
+    if (!prefs.begin(_namespace.c_str(), false)) return false;
+    // Never clear the namespace: it also stores config, profiles and actions.
+    const bool pairedOk = !prefs.isKey("pair_paired") || prefs.remove("pair_paired");
+    const bool nameOk = !prefs.isKey("pair_gw_name") || prefs.remove("pair_gw_name");
+    const bool macOk = !prefs.isKey("pair_gw_mac") || prefs.remove("pair_gw_mac");
+    const bool pinOk = !prefs.isKey("pair_rpin") || prefs.remove("pair_rpin");
+    prefs.end();
+    return pairedOk && nameOk && macOk && pinOk;
   }
 
   size_t loadPairedModules(ArmorLinkStoredPairedModule outModules[MAX_PAIRED_MODULES]) {
@@ -623,6 +816,13 @@ private:
     return cleaned;
   }
 
+  static String cleanRouteListValue(const String& value) {
+    String cleaned = cleanActionListValue(value);
+    cleaned.replace(";", " ");
+    cleaned.replace("~", " ");
+    return cleaned;
+  }
+
   static void saveCustomActionList(
       Preferences& prefs,
       const ArmorLinkActionDefinition& definition) {
@@ -657,12 +857,43 @@ private:
     prefs.putString("act_list", nextList);
   }
 
+  static void removeCustomActionListEntry(
+      Preferences& prefs,
+      const String& entity,
+      const String& command) {
+    String actionList = prefs.getString("act_list", "");
+    const String prefix = entity + "|" + command + "|";
+    String nextList;
+
+    int start = 0;
+    while (start < static_cast<int>(actionList.length())) {
+      const int end = actionList.indexOf('\n', start);
+      const String line =
+          end < 0
+              ? actionList.substring(start)
+              : actionList.substring(start, end);
+
+      if (!line.startsWith(prefix) && !line.isEmpty()) {
+        nextList += line;
+        nextList += "\n";
+      }
+
+      if (end < 0) {
+        break;
+      }
+      start = end + 1;
+    }
+
+    prefs.putString("act_list", nextList);
+  }
+
   static const char* actionComponentKindToString(
       ArmorLinkActionComponentKind kind) {
     switch (kind) {
       case ArmorLinkActionComponentKind::Servo: return "servo";
       case ArmorLinkActionComponentKind::Led: return "led";
       case ArmorLinkActionComponentKind::Gpio: return "gpio";
+      case ArmorLinkActionComponentKind::Button: return "button";
       case ArmorLinkActionComponentKind::State: return "state";
       default: return "gpio";
     }
@@ -673,6 +904,7 @@ private:
     if (kind.equalsIgnoreCase("servo")) return ArmorLinkActionComponentKind::Servo;
     if (kind.equalsIgnoreCase("led")) return ArmorLinkActionComponentKind::Led;
     if (kind.equalsIgnoreCase("gpio")) return ArmorLinkActionComponentKind::Gpio;
+    if (kind.equalsIgnoreCase("button")) return ArmorLinkActionComponentKind::Button;
     if (kind.equalsIgnoreCase("state")) return ArmorLinkActionComponentKind::State;
     if (kind.equalsIgnoreCase("waitTarget")) return ArmorLinkActionComponentKind::State;
     if (kind.equalsIgnoreCase("preset")) return ArmorLinkActionComponentKind::State;
@@ -699,6 +931,83 @@ private:
       componentList += cleanActionListValue(component.section.isEmpty() ? String("Actions") : component.section);
       componentList += "|";
       componentList += component.defaultValue ? "1" : "0";
+      if (component.kind == ArmorLinkActionComponentKind::Servo &&
+          component.hasServoConfig) {
+        componentList += "|";
+        componentList += String(component.servoPin);
+        componentList += "|";
+        componentList += String(component.servoOpenPosition);
+        componentList += "|";
+        componentList += String(component.servoClosedPosition);
+        componentList += "|";
+        componentList += String(component.servoMinPulseUs);
+        componentList += "|";
+        componentList += String(component.servoMaxPulseUs);
+        componentList += "|";
+        componentList += cleanActionListValue(component.servoProfile);
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Led &&
+          component.hasLedConfig) {
+        componentList += "|";
+        componentList += String(component.ledPin);
+        componentList += "|";
+        componentList += String(component.ledCount);
+        componentList += "|";
+        componentList += String(component.ledStartIndex);
+        componentList += "|";
+        componentList += String(component.ledBrightness);
+        componentList += "|";
+        componentList += cleanActionListValue(component.ledChipset);
+        componentList += "|";
+        componentList += cleanActionListValue(component.ledColorOrder);
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Gpio &&
+          component.hasGpioConfig) {
+        componentList += "|";
+        componentList += String(component.gpioPin);
+        componentList += "|";
+        componentList += cleanActionListValue(component.gpioMode);
+        componentList += "|";
+        componentList += component.gpioDefaultLevel ? "1" : "0";
+        componentList += "|";
+        componentList += component.gpioActiveLow ? "1" : "0";
+      }
+      if (component.kind == ArmorLinkActionComponentKind::Button &&
+          component.hasButtonConfig) {
+        componentList += "|";
+        componentList += String(component.buttonPin);
+        componentList += "|";
+        componentList += component.buttonActiveLow ? "1" : "0";
+        componentList += "|";
+        componentList += String(component.buttonDebounceMs);
+        componentList += "|";
+        componentList += String(component.buttonMultiGapMs);
+        componentList += "|";
+        componentList += String(component.buttonLongPressMs);
+        componentList += "|";
+
+        bool firstRoute = true;
+        for (const auto& route : component.buttonEvents) {
+          if (!firstRoute) {
+            componentList += ";";
+          }
+          firstRoute = false;
+
+          componentList += cleanRouteListValue(route.event);
+          componentList += "~";
+          componentList += cleanRouteListValue(route.mode);
+          componentList += "~";
+          componentList += route.enabled ? "1" : "0";
+          componentList += "~";
+          componentList += cleanRouteListValue(route.action);
+          componentList += "~";
+          componentList += cleanRouteListValue(route.target);
+          componentList += "~";
+          componentList += cleanRouteListValue(route.entity);
+          componentList += "~";
+          componentList += cleanRouteListValue(route.command);
+        }
+      }
       componentList += "\n";
     }
 
@@ -747,10 +1056,12 @@ private:
       return;
     }
 
-    const uint8_t count = data[0];
-    const size_t opSize =
-        length >= 1 + static_cast<size_t>(count) * 5 ? 5 : 4;
-    if (length < 1 + static_cast<size_t>(count) * opSize) {
+    const bool extended = length >= 2 && data[0] == 0xA2;
+    const size_t headerSize = extended ? 2 : 1;
+    const uint8_t count = data[extended ? 1 : 0];
+    const size_t opSize = extended ? 13 :
+        (length >= 1 + static_cast<size_t>(count) * 5 ? 5 : 4);
+    if (length < headerSize + static_cast<size_t>(count) * opSize) {
       return;
     }
 
@@ -762,7 +1073,7 @@ private:
     definition.ops.reserve(count);
 
     for (uint8_t i = 0; i < count; ++i) {
-      const size_t offset = 1 + static_cast<size_t>(i) * opSize;
+      const size_t offset = headerSize + static_cast<size_t>(i) * opSize;
       ArmorLinkActionOp op;
       op.code = static_cast<ArmorLinkActionOpCode>(data[offset]);
       if (data[offset] == 12) {
@@ -772,8 +1083,18 @@ private:
       op.argument =
           static_cast<uint16_t>(data[offset + 2]) |
           (static_cast<uint16_t>(data[offset + 3]) << 8);
-      if (opSize == 5) {
+      if (opSize >= 5) {
         op.value = data[offset + 4] != 0;
+      }
+      if (extended) {
+        op.durationMs = static_cast<uint16_t>(data[offset + 5]) |
+            (static_cast<uint16_t>(data[offset + 6]) << 8);
+        op.color = static_cast<uint32_t>(data[offset + 7]) |
+            (static_cast<uint32_t>(data[offset + 8]) << 8) |
+            (static_cast<uint32_t>(data[offset + 9]) << 16) |
+            (static_cast<uint32_t>(data[offset + 10]) << 24);
+        op.option = data[offset + 11];
+        op.intensity = data[offset + 12];
       }
       definition.ops.push_back(op);
     }

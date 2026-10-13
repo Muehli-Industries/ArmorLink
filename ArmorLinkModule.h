@@ -36,6 +36,7 @@ enum class ArmorLinkActionComponentKind : uint8_t {
   Servo,
   Led,
   Gpio,
+  Button,
   State
 };
 
@@ -51,13 +52,21 @@ enum class ArmorLinkActionOpCode : uint8_t {
   WaitUntilState = 9,
   RepeatPrevious = 10,
   StateSet = 11,
-  SendActionToTarget = 13
+  SendActionToTarget = 13,
+  ServoMoveTo = 14,
+  LedSetColor = 15,
+  LedSetBrightness = 16,
+  LedAnimation = 17
 };
 
 struct ArmorLinkActionOp {
   ArmorLinkActionOpCode code = ArmorLinkActionOpCode::Wait;
   uint8_t componentIndex = 0xFF;
   uint16_t argument = 0;
+  uint16_t durationMs = 0;
+  uint32_t color = 0xFFFFFF;
+  uint8_t option = 0;
+  uint8_t intensity = 255;
   bool value = true;
 };
 
@@ -83,8 +92,24 @@ struct ArmorLinkRemoteCommandDef {
   String command;
 };
 
+struct ArmorLinkButtonEventRouteDef {
+  String event;
+  String mode;
+  bool enabled = true;
+  String action;
+  String target;
+  String entity;
+  String command;
+};
+
 using ArmorLinkActionComponentHandler =
     std::function<void(ArmorLinkActionOpCode op)>;
+
+using ArmorLinkActionComponentArgumentHandler =
+    std::function<void(ArmorLinkActionOpCode op, uint16_t argument)>;
+
+using ArmorLinkActionComponentOperationHandler =
+    std::function<void(const ArmorLinkActionOp& op)>;
 
 using ArmorLinkActionReadyPredicate =
     std::function<bool()>;
@@ -98,10 +123,38 @@ struct ArmorLinkActionComponentDef {
   String section;
   ArmorLinkActionComponentKind kind = ArmorLinkActionComponentKind::Gpio;
   ArmorLinkActionComponentHandler handler;
+  ArmorLinkActionComponentArgumentHandler argumentHandler;
+  ArmorLinkActionComponentOperationHandler operationHandler;
   ArmorLinkActionReadyPredicate isReady;
   bool custom = false;
   bool ready = false;
   bool defaultValue = false;
+  bool hasServoConfig = false;
+  int servoPin = -1;
+  int servoOpenPosition = 90;
+  int servoClosedPosition = 0;
+  int servoMinPulseUs = 500;
+  int servoMaxPulseUs = 2400;
+  String servoProfile;
+  bool hasLedConfig = false;
+  int ledPin = -1;
+  int ledCount = 1;
+  int ledStartIndex = 0;
+  int ledBrightness = 128;
+  String ledChipset = "WS2812B";
+  String ledColorOrder = "GRB";
+  bool hasGpioConfig = false;
+  int gpioPin = -1;
+  String gpioMode = "output";
+  bool gpioDefaultLevel = false;
+  bool gpioActiveLow = false;
+  bool hasButtonConfig = false;
+  int buttonPin = -1;
+  bool buttonActiveLow = true;
+  int buttonDebounceMs = 30;
+  int buttonMultiGapMs = 300;
+  int buttonLongPressMs = 500;
+  std::vector<ArmorLinkButtonEventRouteDef> buttonEvents;
 };
 
 struct ArmorLinkIntBinding {
@@ -816,6 +869,18 @@ public:
     return *this;
   }
 
+  ArmorLinkActionComponentBuilder& onExecute(
+      ArmorLinkActionComponentArgumentHandler handler) {
+    _component.argumentHandler = handler;
+    return *this;
+  }
+
+  ArmorLinkActionComponentBuilder& onExecute(
+      ArmorLinkActionComponentOperationHandler handler) {
+    _component.operationHandler = handler;
+    return *this;
+  }
+
   ArmorLinkActionComponentBuilder& onReady(ArmorLinkActionReadyPredicate predicate) {
     _component.isReady = predicate;
     return *this;
@@ -883,6 +948,92 @@ public:
     return _components.back();
   }
 
+  void setServoConfig(
+      ArmorLinkActionComponentDef& component,
+      int pin,
+      int openPosition,
+      int closedPosition,
+      int minPulseUs,
+      int maxPulseUs,
+      const String& servoProfile = "") {
+    component.hasServoConfig = true;
+    component.servoPin = pin;
+    component.servoOpenPosition = openPosition;
+    component.servoClosedPosition = closedPosition;
+    component.servoMinPulseUs = minPulseUs;
+    component.servoMaxPulseUs = maxPulseUs;
+    component.servoProfile = servoProfile;
+  }
+
+  void setLedConfig(
+      ArmorLinkActionComponentDef& component,
+      int pin,
+      int count,
+      int startIndex,
+      int brightness,
+      const String& chipset,
+      const String& colorOrder) {
+    component.hasLedConfig = true;
+    component.ledPin = pin;
+    component.ledCount = count;
+    component.ledStartIndex = startIndex;
+    component.ledBrightness = brightness;
+    component.ledChipset = chipset.isEmpty() ? String("WS2812B") : chipset;
+    component.ledColorOrder = colorOrder.isEmpty() ? String("GRB") : colorOrder;
+  }
+
+  void setGpioConfig(
+      ArmorLinkActionComponentDef& component,
+      int pin,
+      const String& mode,
+      bool defaultLevel,
+      bool activeLow) {
+    component.hasGpioConfig = true;
+    component.gpioPin = pin;
+    component.gpioMode = mode.equalsIgnoreCase("input") ? String("input") : String("output");
+    component.gpioDefaultLevel = defaultLevel;
+    component.gpioActiveLow = activeLow;
+  }
+
+  void setButtonConfig(
+      ArmorLinkActionComponentDef& component,
+      int pin,
+      bool activeLow,
+      int debounceMs,
+      int multiGapMs,
+      int longPressMs) {
+    component.hasButtonConfig = true;
+    component.buttonPin = pin;
+    component.buttonActiveLow = activeLow;
+    component.buttonDebounceMs = constrain(debounceMs, 1, 250);
+    component.buttonMultiGapMs = constrain(multiGapMs, 50, 1500);
+    component.buttonLongPressMs = constrain(longPressMs, 100, 5000);
+  }
+
+  void clearButtonEventRoutes(ArmorLinkActionComponentDef& component) {
+    component.buttonEvents.clear();
+  }
+
+  void addButtonEventRoute(
+      ArmorLinkActionComponentDef& component,
+      const String& event,
+      const String& mode,
+      bool enabled,
+      const String& action,
+      const String& target,
+      const String& entity,
+      const String& command) {
+    ArmorLinkButtonEventRouteDef route;
+    route.event = event;
+    route.mode = mode.equalsIgnoreCase("action") ? String("action") : String("sendCommand");
+    route.enabled = enabled;
+    route.action = action;
+    route.target = target;
+    route.entity = entity;
+    route.command = command;
+    component.buttonEvents.push_back(route);
+  }
+
   ArmorLinkActionComponentBuilder addServo(const String& id) {
     return addComponent(id, ArmorLinkActionComponentKind::Servo);
   }
@@ -893,6 +1044,10 @@ public:
 
   ArmorLinkActionComponentBuilder addGpio(const String& id) {
     return addComponent(id, ArmorLinkActionComponentKind::Gpio);
+  }
+
+  ArmorLinkActionComponentBuilder addButton(const String& id) {
+    return addComponent(id, ArmorLinkActionComponentKind::Button);
   }
 
   ArmorLinkActionComponentBuilder addState(const String& id) {
@@ -913,6 +1068,17 @@ public:
 
   const std::vector<ArmorLinkActionComponentDef>& components() const {
     return _components;
+  }
+
+  bool removeCustomComponent(const String& id) {
+    for (auto it = _components.begin(); it != _components.end(); ++it) {
+      if (it->custom && it->id.equalsIgnoreCase(id)) {
+        _components.erase(it);
+        return true;
+      }
+    }
+
+    return false;
   }
 
   const std::vector<ArmorLinkActionDef>& customActions() const {
@@ -1010,6 +1176,20 @@ public:
     return _customActions.back();
   }
 
+  bool removeCustomAction(
+      const String& entity,
+      const String& command) {
+    for (auto it = _customActions.begin(); it != _customActions.end(); ++it) {
+      if (it->entity.equalsIgnoreCase(entity) &&
+          it->command.equalsIgnoreCase(command)) {
+        _customActions.erase(it);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   int findComponentIndex(const String& id) const {
     for (size_t i = 0; i < _components.size(); ++i) {
       if (_components[i].id.equalsIgnoreCase(id)) {
@@ -1090,6 +1270,20 @@ public:
     return true;
   }
 
+  bool removeDefinition(
+      const String& entity,
+      const String& command) {
+    for (auto it = _definitions.begin(); it != _definitions.end(); ++it) {
+      if (it->entity.equalsIgnoreCase(entity) &&
+          it->command.equalsIgnoreCase(command)) {
+        _definitions.erase(it);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   bool wouldCreateCycle(
       const ArmorLinkActionRegistry& actions,
       const ArmorLinkActionDefinition& candidate) const {
@@ -1124,6 +1318,22 @@ public:
       return false;
     }
 
+    _running = true;
+    tick(actions);
+    return true;
+  }
+
+  bool executeDefinition(
+      const ArmorLinkActionDefinition& definition,
+      const ArmorLinkActionRegistry& actions) {
+    if (_running || definition.ops.empty()) return false;
+    _activeOps.clear();
+    _activeIndex = 0;
+    clearWaitState();
+    if (!appendDefinitionOpsTo(definition, actions, 0, _activeOps) || _activeOps.empty()) {
+      _activeOps.clear();
+      return false;
+    }
     _running = true;
     tick(actions);
     return true;
@@ -1202,6 +1412,15 @@ public:
 
       if (!executeImmediateOp(op, actions)) {
         stop();
+        return;
+      }
+
+      if (op.code == ArmorLinkActionOpCode::ServoMoveTo &&
+          op.durationMs > 0 && op.componentIndex < _components.size()) {
+        _waitComponentIndex = op.componentIndex;
+        _waitStartedAtMs = millis();
+        _waitDurationMs = op.durationMs + 2000;
+        _waitingForState = true;
         return;
       }
 
@@ -1371,7 +1590,7 @@ private:
 
     auto& component = _components[op.componentIndex];
 
-    if (!component.handler) {
+    if (!component.handler && !component.argumentHandler && !component.operationHandler) {
       if (op.code == ArmorLinkActionOpCode::StateSet &&
           component.kind == ArmorLinkActionComponentKind::State) {
         component.ready = op.value;
@@ -1381,7 +1600,13 @@ private:
       return false;
     }
 
-    component.handler(op.code);
+    if (component.operationHandler) {
+      component.operationHandler(op);
+    } else if (component.argumentHandler) {
+      component.argumentHandler(op.code, op.argument);
+    } else {
+      component.handler(op.code);
+    }
     if (op.code == ArmorLinkActionOpCode::StateSet &&
         component.kind == ArmorLinkActionComponentKind::State) {
       component.ready = op.value;
@@ -1480,6 +1705,7 @@ public:
   ArmorLinkModuleType type() const { return _type; }
   const String& version() const { return _version; }
   const String& profileTarget() const { return _profileTarget; }
+  const String& profileIdentifier() const { return _profileIdentifier; }
   const String& profileName() const { return _profileName; }
   const String& defaultProfileName() const { return _defaultProfileName; }
   bool profileNameImported() const { return _profileNameImported; }
@@ -1505,6 +1731,11 @@ public:
     return *this;
   }
 
+  ArmorLinkModule& profileIdentifier(const String& value) {
+    _profileIdentifier = value;
+    return *this;
+  }
+
   ArmorLinkModule& profileName(const String& value) {
     if (_defaultProfileName.isEmpty()) {
       _defaultProfileName = value;
@@ -1516,6 +1747,15 @@ public:
 
   ArmorLinkModule& activeProfileName(const String& value) {
     _profileName = value;
+    _profileNameImported = true;
+    return *this;
+  }
+
+  ArmorLinkModule& activeProfile(
+      const String& identifier,
+      const String& name) {
+    _profileIdentifier = identifier;
+    _profileName = name;
     _profileNameImported = true;
     return *this;
   }
@@ -1548,6 +1788,7 @@ private:
   ArmorLinkModuleType _type;
   String _version = "1.0";
   String _profileTarget;
+  String _profileIdentifier;
   String _profileName;
   String _defaultProfileName;
   bool _profileNameImported = false;

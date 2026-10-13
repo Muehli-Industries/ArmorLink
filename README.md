@@ -91,8 +91,36 @@ ArmorLink.begin(module, options);
 
 ## ⚙️ Configuration & Actions
 
+`ArmorLink.begin()` automatically registers **Reset Pairing info** in the
+**ArmorLink** section (`pairing/reset`), including the Web Serial descriptor.
+It removes only this node's gateway association: paired flag, gateway name,
+gateway MAC and recovery PIN. Configuration, profiles, action definitions,
+components and a gateway's paired-module list are preserved. The node becomes
+unpaired immediately without a reboot; flash updated firmware to add the action
+to existing devices. An unpaired module can then join a new gateway on the same
+ESP-NOW channel.
+
 ArmorLink modules define their own configuration and actions.  
 The app automatically adapts to it.
+
+### RAM usage
+
+Local BLE configuration descriptors are streamed directly into 80-byte chunks;
+the gateway does not retain the complete descriptor string during this transfer.
+
+The ESP-NOW receive queue defaults to 64 slots. For nodes with limited free RAM,
+define its size before including ArmorLink (use the same value in all translation
+units, preferably through a compiler define):
+
+```cpp
+#define ARMORLINK_ESPNOW_QUEUE_SIZE 16
+#include <ArmorLink.h>
+```
+
+Reducing 64 slots to 16 saves about 12 KB with the current packet format. A smaller
+queue accepts fewer pending packets and can drop more packets during bursts or
+when the main loop is blocked. At least two slots are required; the ring buffer
+keeps one slot unused to distinguish full from empty.
 
 ```cpp
 void setupModule() {
