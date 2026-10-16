@@ -6,7 +6,7 @@
 #include <Arduino.h>
 
 #ifndef ARMORLINK_VERSION
-#define ARMORLINK_VERSION "0.5.0-beta.2"
+#define ARMORLINK_VERSION "0.5.0"
 #endif
 
 static constexpr uint8_t  ARMORLINK_PROTOCOL_VERSION = 2;
@@ -177,7 +177,10 @@ inline bool convertArmorLinkLegacyToPacket(const ArmorLinkLegacyPacket& oldMsg, 
   armorlinkCopyString(out.target, sizeof(out.target), oldMsg.target);
   armorlinkCopyString(out.entity, sizeof(out.entity), oldMsg.entity);
   armorlinkCopyString(out.command, sizeof(out.command), oldMsg.command);
-  setArmorLinkPacketPayload(out, String(oldMsg.valueStr));
+  // Legacy conversion can run on the WiFi task. Avoid heap allocation and
+  // do not read beyond a legacy payload that has no terminating zero.
+  out.payloadLen = strnlen(oldMsg.valueStr, sizeof(oldMsg.valueStr));
+  memcpy(out.payload, oldMsg.valueStr, out.payloadLen);
   return true;
 }
 

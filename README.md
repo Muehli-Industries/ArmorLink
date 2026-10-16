@@ -103,6 +103,78 @@ ESP-NOW channel.
 ArmorLink modules define their own configuration and actions.  
 The app automatically adapts to it.
 
+### Compile-time features
+
+All features remain available by default. To remove unused functionality from
+flash and RAM, define exclusions **before any ArmorLink header**:
+
+```cpp
+// Single node with BLE, ordinary actions and custom serial commands:
+#define ARMORLINK_EXCLUDE_ESPNOW
+#define ARMORLINK_EXCLUDE_ACTIONBUILDER
+#define ARMORLINK_EXCLUDE_DATASTREAMS
+#include <ArmorLink.h>
+```
+
+| Define | Removes |
+| --- | --- |
+| `ARMORLINK_EXCLUDE_ESPNOW` | ESP-NOW/WiFi transport, receive queue, peer map, pairing processing and network tables. Gateway mode is disabled; local BLE logs and telemetry still work. |
+| `ARMORLINK_EXCLUDE_BLE` | BLE stack integration, server, callbacks and transfers. BLE notification helpers become no-ops. |
+| `ARMORLINK_EXCLUDE_ACTIONBUILDER` | Dynamic sequences, components, custom actions and their storage/descriptor integration. Ordinary `module.actions().add(...).command(...).onExecute(...)` remains available; `module.actionBuilder()` is absent. |
+| `ARMORLINK_EXCLUDE_DATASTREAMS` | Stream routing, subscriptions, handlers and rate tables. Registration/subscription returns `false`; sending returns `ESP_ERR_NOT_SUPPORTED`. Telemetry remains available. |
+| `ARMORLINK_EXCLUDE_WEB_SERIAL` | The `@ALF:` JSON input/event protocol and its reachable setup/import handlers. Custom `module.serial()` commands and the interactive serial menu remain available. |
+
+The central configuration is [ArmorLinkFeatures.h](ArmorLinkFeatures.h).
+Exclusions remove the corresponding built-in system settings and pairing-reset
+action where applicable; persisted settings cannot re-enable excluded radios.
+Existing NVS data is preserved. Dynamic ActionBuilder commands report
+`unsupported_feature` when excluded, and descriptors report
+`supportsActionBuilder: false` without advertising components or sequences.
+Remote transport operations return `ESP_ERR_NOT_SUPPORTED` when ESP-NOW is
+excluded.
+
+For sketches with multiple translation units, apply the same defines everywhere,
+preferably using compiler `-D` flags. Calls to the dynamic ActionBuilder in your
+own sketch must also be guarded with `#if ARMORLINK_HAS_ACTIONBUILDER`.
+
+### Configurable capacities and diagnostics
+
+These defaults are centralized in `ArmorLinkFeatures.h` and can be overridden
+before including ArmorLink:
+
+| Define | Default |
+| --- | ---: |
+| `ARMORLINK_ESPNOW_QUEUE_SIZE` | 64 |
+| `ARMORLINK_MAX_PAIRED_MODULES` | 16 |
+| `ARMORLINK_MAX_PAIRING_CANDIDATES` | 16 |
+| `ARMORLINK_MAX_DATA_STREAM_SUBSCRIPTIONS` | 24 |
+| `ARMORLINK_MAX_LOCAL_DATA_STREAM_SUBSCRIPTIONS` | 12 |
+| `ARMORLINK_MAX_REQUESTED_DATA_STREAMS` | 12 |
+| `ARMORLINK_MAX_DATA_STREAM_HANDLERS` | 12 |
+| `ARMORLINK_MAX_DATA_STREAM_RATE_KEYS` | 8 |
+| `ARMORLINK_MAX_DATA_STREAM_VALUES` | 8 |
+| `ARMORLINK_MAX_TELEMETRY_KEYS` | 16 |
+| `ARMORLINK_SERIAL_COMMAND_MAX_LEN` | 31 |
+| `ARMORLINK_SERIAL_LINE_MAX_LEN` | 1024 |
+
+Enabled tables require positive capacities; the ESP-NOW queue requires at least
+two slots. Reducing paired-module capacity limits the number of stored peers
+that can be loaded and subsequently saved. Packet sizes and protocol identifiers
+remain unchanged.
+
+`ARMORLINK_INTERNAL_LOG_LEVEL` controls internal diagnostics:
+
+- `0`: omit diagnostics and their argument evaluation.
+- `1` (default): retain existing regular diagnostics; `ARMORLINK_VERBOSE` retains
+  its existing role.
+- `2`: include regular and verbose diagnostics.
+
+Application logs (`ArmorLink.info/warn/error/debug`, structured logs), menu output
+and enabled protocol responses remain available at level `0`.
+
+[Feature footprint chart](docs/feature-footprint.png) compares flash and static RAM usage.
+[Runtime heap chart](docs/heap-benchmark.png) compares feature variants on a physical ESP32.
+
 ### RAM usage
 
 Local BLE configuration descriptors are streamed directly into 80-byte chunks;
@@ -219,3 +291,37 @@ Just define your module in firmware, and you're ready to go.
 ## 📄 License
 
 MIT License
+
+### ActionBuilder log messages
+
+The dynamic ActionBuilder supports **Log Message** blocks with Debug, Info,
+Warning or Error and custom text. Insert live State values using
+`{state:componentId}`, for example `Faceplate open: {state:faceplateOpen}`.
+The block uses the existing application logging settings and is covered by
+`ARMORLINK_EXCLUDE_ACTIONBUILDER`.
+
+Web Serial configuration transfers stream the complete WebSerial descriptor in
+bounded, UTF-8-safe 192-byte chunks. The firmware no longer builds a full JSON
+String for this transport or silently falls back to the BLE descriptor when a
+large descriptor does not fit in a contiguous heap block. Metadata is measured
+before sending; changed content is rejected without a successful end frame.
+This preserves ActionBuilder capabilities and definitions on memory-constrained
+nodes. No stored configuration is erased or reset. Focused regression:
+`python3 tests/serial_descriptor_stream_test.py`.
+
+### Startup sequence
+
+Create a dedicated **Startup sequence** in Web Setup using normal ActionBuilder
+blocks. It can call existing Actions such as **Close Faceplate** via **Run
+Action**. The marked Action starts once in the first `ArmorLink.loop()` after
+initialization; saving it never triggers execution. It persists across reboots
+and is included in profiles.
+
+### Stable release
+
+ArmorLink 0.5.0 includes the configurable features, ActionBuilder Log Messages,
+Startup Actions and bounded full WebSerial descriptor streaming. Default feature
+flags remain enabled; existing device configurations are preserved.
+
+**App compatibility:** ArmorLink 0.5.0 requires ArmorLink App 1.6 or later for
+correct operation. Update the app together with the firmware.

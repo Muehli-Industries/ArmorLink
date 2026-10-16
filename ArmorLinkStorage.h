@@ -22,7 +22,7 @@ struct ArmorLinkStoredPairedModule {
 
 class ArmorLinkStorage {
 public:
-  static constexpr size_t MAX_PAIRED_MODULES = 16;
+  static constexpr size_t MAX_PAIRED_MODULES = ARMORLINK_MAX_PAIRED_MODULES;
 
   ArmorLinkStorage() = default;
 
@@ -62,7 +62,7 @@ public:
               finalValue = clampIntValue(field, loadedValue);
 
               if (finalValue != loadedValue) {
-                Serial.printf("[CONFIG] Clamped persisted value for %s from %d to %d\n",
+                AL_INTERNAL_PRINTF("[CONFIG] Clamped persisted value for %s from %d to %d\n",
                               field.key.c_str(),
                               loadedValue,
                               finalValue);
@@ -94,7 +94,7 @@ public:
               finalValue = clampFloatValue(field, loadedValue);
 
               if (finalValue != loadedValue) {
-                Serial.printf("[CONFIG] Clamped persisted value for %s from %.3f to %.3f\n",
+                AL_INTERNAL_PRINTF("[CONFIG] Clamped persisted value for %s from %.3f to %.3f\n",
                               field.key.c_str(),
                               loadedValue,
                               finalValue);
@@ -331,6 +331,7 @@ static String sanitizeKey(const String& input) {
     return true;
   }
 
+#if ARMORLINK_HAS_ACTIONBUILDER
   bool loadActionDefinitions(ArmorLinkModule& module) {
     if (_namespace.isEmpty()) {
       return false;
@@ -553,7 +554,9 @@ static String sanitizeKey(const String& input) {
     prefs.end();
     return true;
   }
+#endif
 
+#if ARMORLINK_HAS_ACTIONBUILDER
   bool saveActionDefinition(
       const ArmorLinkActionDefinition& definition,
       bool saveAsCustomAction = false,
@@ -569,9 +572,16 @@ static String sanitizeKey(const String& input) {
       return false;
     }
 
+    bool hasLogMessages = false;
+    for (const auto& op : definition.ops) {
+      if (op.code != ArmorLinkActionOpCode::LogMessage) continue;
+      if (!op.logMessage || op.logMessage->level > AL_LOG_ERROR ||
+          op.logMessage->text.isEmpty() || op.logMessage->text.length() > 128) return false;
+      hasLogMessages = true;
+    }
     std::vector<uint8_t> data;
     data.reserve(2 + definition.ops.size() * 13);
-    data.push_back(0xA2);
+    data.push_back(hasLogMessages ? 0xA3 : 0xA2);
     data.push_back(static_cast<uint8_t>(definition.ops.size()));
 
     for (const auto& op : definition.ops) {
@@ -590,6 +600,15 @@ static String sanitizeKey(const String& input) {
       data.push_back(op.intensity);
     }
 
+    // A3 keeps the A2 fixed records and appends bounded log payloads in op order.
+    for (const auto& op : definition.ops) {
+      if (op.code != ArmorLinkActionOpCode::LogMessage) continue;
+      data.push_back(static_cast<uint8_t>(op.logMessage->level));
+      data.push_back(static_cast<uint8_t>(op.logMessage->text.length()));
+      for (size_t i = 0; i < op.logMessage->text.length(); ++i)
+        data.push_back(static_cast<uint8_t>(op.logMessage->text[i]));
+    }
+
     Preferences prefs;
     if (!prefs.begin(_namespace.c_str(), false)) {
       return false;
@@ -605,11 +624,22 @@ static String sanitizeKey(const String& input) {
       saveCustomComponentList(prefs, *runtime);
       saveRemoteCommandList(prefs, *runtime);
     }
+    bool startupSaved = true;
+    if (written == data.size()) {
+      const String identity = definition.entity + "|" + definition.command;
+      if (definition.startup) {
+        startupSaved = prefs.putString("act_boot", identity) > 0;
+      } else if (prefs.getString("act_boot", "") == identity) {
+        startupSaved = prefs.remove("act_boot");
+      }
+    }
     prefs.end();
 
-    return written == data.size();
+    return written == data.size() && startupSaved;
   }
+#endif
 
+#if ARMORLINK_HAS_ACTIONBUILDER
   bool saveActionComponents(
       const ArmorLinkActionBuilderRuntime& runtime) {
     if (_namespace.isEmpty()) {
@@ -625,7 +655,9 @@ static String sanitizeKey(const String& input) {
     prefs.end();
     return true;
   }
+#endif
 
+#if ARMORLINK_HAS_ACTIONBUILDER
   bool deleteActionDefinition(
       const String& entity,
       const String& command) {
@@ -645,16 +677,23 @@ static String sanitizeKey(const String& input) {
       return false;
     }
 
+    if (prefs.getString("act_boot", "") == entity + "|" + command && !prefs.remove("act_boot")) {
+      prefs.end();
+      return false;
+    }
     prefs.remove(storageKey.c_str());
     removeCustomActionListEntry(prefs, entity, command);
     prefs.end();
     return true;
   }
+#endif
 
+#if ARMORLINK_HAS_ACTIONBUILDER
   bool deleteActionComponent(
       const ArmorLinkActionBuilderRuntime& runtime) {
     return saveActionComponents(runtime);
   }
+#endif
 
   bool clearPairingInfo() {
     if (_namespace.isEmpty()) return false;
@@ -667,6 +706,32 @@ static String sanitizeKey(const String& input) {
     const bool pinOk = !prefs.isKey("pair_rpin") || prefs.remove("pair_rpin");
     prefs.end();
     return pairedOk && nameOk && macOk && pinOk;
+  }
+
+  bool clearPairedModules() {
+#if ARMORLINK_HAS_ESPNOW
+    if (_namespace.isEmpty()) return false;
+    Preferences prefs;
+    if (!prefs.begin(_namespace.c_str(), false)) return false;
+    // Commit an empty list first. A power interruption during key cleanup must
+    // never reload a partly removed list. Never clear config/profile namespaces.
+    if (prefs.putUInt("paired_count", 0) != sizeof(uint32_t)) {
+      prefs.end();
+      return false;
+    }
+    bool cleaned = true;
+    for (size_t i = 0; i < MAX_PAIRED_MODULES; ++i) {
+      for (const char* prefix : {"pm_name_", "pm_type_", "pm_mac_", "pm_modver_", "pm_alver_"}) {
+        String key = String(prefix) + i;
+        if (prefs.isKey(key.c_str()) && !prefs.remove(key.c_str())) cleaned = false;
+      }
+    }
+    prefs.end();
+    if (!cleaned) AL_INTERNAL_PRINTLN("[PAIR][GW] Empty paired list saved; some unused metadata keys could not be removed");
+    return true;
+#else
+    return false;
+#endif
   }
 
   size_t loadPairedModules(ArmorLinkStoredPairedModule outModules[MAX_PAIRED_MODULES]) {
@@ -912,6 +977,7 @@ private:
     return ArmorLinkActionComponentKind::Gpio;
   }
 
+#if ARMORLINK_HAS_ACTIONBUILDER
   static void saveCustomComponentList(
       Preferences& prefs,
       const ArmorLinkActionBuilderRuntime& runtime) {
@@ -1013,7 +1079,9 @@ private:
 
     prefs.putString("act_comp", componentList);
   }
+#endif
 
+#if ARMORLINK_HAS_ACTIONBUILDER
   static void saveRemoteCommandList(
       Preferences& prefs,
       const ArmorLinkActionBuilderRuntime& runtime) {
@@ -1036,7 +1104,9 @@ private:
 
     prefs.putString("act_rcmd", remoteCommandList);
   }
+#endif
 
+#if ARMORLINK_HAS_ACTIONBUILDER
   static void loadActionDefinitionForAction(
       Preferences& prefs,
       ArmorLinkModule& module,
@@ -1056,7 +1126,8 @@ private:
       return;
     }
 
-    const bool extended = length >= 2 && data[0] == 0xA2;
+    const bool hasLogPayloads = length >= 2 && data[0] == 0xA3;
+    const bool extended = length >= 2 && (data[0] == 0xA2 || hasLogPayloads);
     const size_t headerSize = extended ? 2 : 1;
     const uint8_t count = data[extended ? 1 : 0];
     const size_t opSize = extended ? 13 :
@@ -1072,6 +1143,7 @@ private:
     definition.section = action.section;
     definition.ops.reserve(count);
 
+    size_t logOffset = headerSize + static_cast<size_t>(count) * opSize;
     for (uint8_t i = 0; i < count; ++i) {
       const size_t offset = headerSize + static_cast<size_t>(i) * opSize;
       ArmorLinkActionOp op;
@@ -1096,9 +1168,23 @@ private:
         op.option = data[offset + 11];
         op.intensity = data[offset + 12];
       }
+      if (op.code == ArmorLinkActionOpCode::LogMessage) {
+        if (!hasLogPayloads || logOffset + 2 > data.size()) return;
+        uint8_t level = data[logOffset++];
+        uint8_t size = data[logOffset++];
+        if (level > AL_LOG_ERROR || size == 0 || size > 128 || logOffset + size > data.size()) return;
+        auto message = std::make_shared<ArmorLinkActionLogMessage>();
+        message->level = static_cast<ArmorLinkLogLevel>(level);
+        message->text.reserve(size);
+        for (uint8_t j = 0; j < size; ++j) message->text += static_cast<char>(data[logOffset++]);
+        op.logMessage = message;
+      }
       definition.ops.push_back(op);
     }
 
+    if (hasLogPayloads && logOffset != data.size()) return;
+    definition.startup = prefs.getString("act_boot", "") == definition.entity + "|" + definition.command;
     module.actionBuilder().setDefinition(definition);
   }
+#endif
 };

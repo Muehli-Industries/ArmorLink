@@ -1,0 +1,9 @@
+# Local tests and generated Python caches
+/tests/
+/tools/
+**/__pycache__/
+
+# Only the two published measurement charts belong in docs.
+/docs/*
+!/docs/feature-footprint.png
+!/docs/heap-benchmark.png

@@ -3,6 +3,7 @@
 #define ARMORLINK_BLE_H
 
 #include "ArmorLinkDebug.h"
+#if ARMORLINK_HAS_BLE
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -119,6 +120,16 @@ public:
 
     BLEAdvertising* advertising = BLEDevice::getAdvertising();
     advertising->addServiceUUID(ARMORLINK_SERVICE_UUID);
+    // Versioned public setup hint (never the PIN). The reserved 0xFFFF
+    // manufacturer namespace plus AL signature avoids claiming a company ID.
+    // Flags (3) + 128-bit service UUID (18) + manufacturer record (8) = 29 bytes.
+    const uint8_t setupHint[] = {0xFF, 0xFF, 'A', 'L', 1,
+        static_cast<uint8_t>(ArmorLinkSecurity::isPinSet() ? 1 : 0)};
+    BLEAdvertisementData advertisement;
+    advertisement.setFlags(0x06); // General discoverable, BR/EDR unsupported.
+    advertisement.setCompleteServices(BLEUUID(ARMORLINK_SERVICE_UUID));
+    advertisement.setManufacturerData(String(reinterpret_cast<const char*>(setupHint), sizeof(setupHint)));
+    advertising->setAdvertisementData(advertisement);
     // Keep the local name separate from the 128-bit service UUID so both
     // fit into the legacy BLE advertising packets used by iOS discovery.
     BLEAdvertisementData scanResponse;
@@ -181,9 +192,9 @@ public:
       yield();
     }
 
-    Serial.printf("[BLE][TX] event bytes=%u\n", static_cast<unsigned>(json.length()));
+    AL_INTERNAL_PRINTF("[BLE][TX] event bytes=%u\n", static_cast<unsigned>(json.length()));
     if (json.length() <= 2) {
-      Serial.printf("[BLE][TX] short event=%s heap8=%u largestBlock8=%u\n",
+      AL_INTERNAL_PRINTF("[BLE][TX] short event=%s heap8=%u largestBlock8=%u\n",
                     json.c_str(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     }
@@ -257,7 +268,7 @@ void processPendingConfigTransfer() {
     const String& json,
     bool partial)
 {
-     Serial.printf(
+     AL_INTERNAL_PRINTF(
 
         "[CONFIG TX] BLE connected=%s\n",
 
@@ -271,11 +282,11 @@ void processPendingConfigTransfer() {
             ? 1
             : ((totalLen + chunkSize - 1) / chunkSize);
 
-    Serial.println("========== CONFIG TRANSFER ==========");
-    Serial.printf("Request ID  : %u\n", requestId);
-    Serial.printf("Total length: %u bytes\n", static_cast<unsigned>(totalLen));
-    Serial.printf("Chunk size  : %u bytes\n", static_cast<unsigned>(chunkSize));
-    Serial.printf("Chunk count : %u\n", static_cast<unsigned>(chunkCount));
+    AL_INTERNAL_PRINTLN("========== CONFIG TRANSFER ==========");
+    AL_INTERNAL_PRINTF("Request ID  : %u\n", requestId);
+    AL_INTERNAL_PRINTF("Total length: %u bytes\n", static_cast<unsigned>(totalLen));
+    AL_INTERNAL_PRINTF("Chunk size  : %u bytes\n", static_cast<unsigned>(chunkSize));
+    AL_INTERNAL_PRINTF("Chunk count : %u\n", static_cast<unsigned>(chunkCount));
 
     const uint16_t metaDelayMs = 80;
     const uint16_t chunkDelayMs = 50;
@@ -296,7 +307,7 @@ void processPendingConfigTransfer() {
         doc.clear();
         notifyEventJson(out);
 
-        Serial.println("[CONFIG TX] Meta sent");
+        AL_INTERNAL_PRINTLN("[CONFIG TX] Meta sent");
 
         delay(metaDelayMs);
         yield();
@@ -320,7 +331,7 @@ void processPendingConfigTransfer() {
         serializeJson(doc, out);
         doc.clear();
 
-        Serial.printf(
+        AL_INTERNAL_PRINTF(
             "[CONFIG TX] Chunk %u/%u | start=%u | data=%u | packet=%u\n",
             static_cast<unsigned>(i + 1),
             static_cast<unsigned>(chunkCount),
@@ -350,8 +361,8 @@ void processPendingConfigTransfer() {
         doc.clear();
         notifyEventJson(out);
 
-        Serial.println("[CONFIG TX] End sent");
-        Serial.println("========== CONFIG TRANSFER END ==========");
+        AL_INTERNAL_PRINTLN("[CONFIG TX] End sent");
+        AL_INTERNAL_PRINTLN("========== CONFIG TRANSFER END ==========");
     }
 }
 
@@ -363,7 +374,7 @@ void processPendingConfigTransfer() {
     size_t totalLen,
     bool partial)
 {
-    Serial.printf(
+    AL_INTERNAL_PRINTF(
         "[CONFIG TX] BLE connected=%s\n",
         _clientConnected ? "YES" : "NO"
     );
@@ -374,11 +385,11 @@ void processPendingConfigTransfer() {
             ? 1
             : ((totalLen + chunkSize - 1) / chunkSize);
 
-    Serial.println("========== CONFIG TRANSFER ==========");
-    Serial.printf("Request ID  : %u\n", requestId);
-    Serial.printf("Total length: %u bytes\n", static_cast<unsigned>(totalLen));
-    Serial.printf("Chunk size  : %u bytes\n", static_cast<unsigned>(chunkSize));
-    Serial.printf("Chunk count : %u\n", static_cast<unsigned>(chunkCount));
+    AL_INTERNAL_PRINTLN("========== CONFIG TRANSFER ==========");
+    AL_INTERNAL_PRINTF("Request ID  : %u\n", requestId);
+    AL_INTERNAL_PRINTF("Total length: %u bytes\n", static_cast<unsigned>(totalLen));
+    AL_INTERNAL_PRINTF("Chunk size  : %u bytes\n", static_cast<unsigned>(chunkSize));
+    AL_INTERNAL_PRINTF("Chunk count : %u\n", static_cast<unsigned>(chunkCount));
 
     const uint16_t metaDelayMs = 80;
     const uint16_t chunkDelayMs = 65;
@@ -399,7 +410,7 @@ void processPendingConfigTransfer() {
         doc.clear();
         notifyEventJson(out);
 
-        Serial.println("[CONFIG TX] Meta sent");
+        AL_INTERNAL_PRINTLN("[CONFIG TX] Meta sent");
 
         delay(metaDelayMs);
         yield();
@@ -431,7 +442,7 @@ void processPendingConfigTransfer() {
         serializeJson(doc, out);
         doc.clear();
 
-        Serial.printf(
+        AL_INTERNAL_PRINTF(
             "[CONFIG TX] Chunk %u/%u | start=%u | data=%u | packet=%u\n",
             static_cast<unsigned>(i + 1),
             static_cast<unsigned>(chunkCount),
@@ -461,8 +472,8 @@ void processPendingConfigTransfer() {
         doc.clear();
         notifyEventJson(out);
 
-        Serial.println("[CONFIG TX] End sent");
-        Serial.println("========== CONFIG TRANSFER END ==========");
+        AL_INTERNAL_PRINTLN("[CONFIG TX] End sent");
+        AL_INTERNAL_PRINTLN("========== CONFIG TRANSFER END ==========");
     }
 }
 
@@ -487,7 +498,7 @@ void processPendingConfigTransfer() {
     TWriter writer,
     bool partial)
 {
-    Serial.printf(
+    AL_INTERNAL_PRINTF(
         "[CONFIG TX] BLE connected=%s\n",
         _clientConnected ? "YES" : "NO"
     );
@@ -498,11 +509,11 @@ void processPendingConfigTransfer() {
             ? 1
             : ((totalLen + chunkSize - 1) / chunkSize);
 
-    Serial.println("========== CONFIG TRANSFER ==========");
-    Serial.printf("Request ID  : %u\n", requestId);
-    Serial.printf("Total length: %u bytes\n", static_cast<unsigned>(totalLen));
-    Serial.printf("Chunk size  : %u bytes\n", static_cast<unsigned>(chunkSize));
-    Serial.printf("Chunk count : %u\n", static_cast<unsigned>(chunkCount));
+    AL_INTERNAL_PRINTLN("========== CONFIG TRANSFER ==========");
+    AL_INTERNAL_PRINTF("Request ID  : %u\n", requestId);
+    AL_INTERNAL_PRINTF("Total length: %u bytes\n", static_cast<unsigned>(totalLen));
+    AL_INTERNAL_PRINTF("Chunk size  : %u bytes\n", static_cast<unsigned>(chunkSize));
+    AL_INTERNAL_PRINTF("Chunk count : %u\n", static_cast<unsigned>(chunkCount));
 
     const uint16_t metaDelayMs = 80;
     const uint16_t chunkDelayMs = 50;
@@ -524,7 +535,7 @@ void processPendingConfigTransfer() {
         doc.clear();
         notifyEventJson(out);
 
-        Serial.println("[CONFIG TX] Meta sent");
+        AL_INTERNAL_PRINTLN("[CONFIG TX] Meta sent");
 
         delay(metaDelayMs);
         yield();
@@ -613,7 +624,7 @@ void processPendingConfigTransfer() {
         serializeJson(doc, out);
         doc.clear();
 
-        Serial.printf(
+        AL_INTERNAL_PRINTF(
             "[CONFIG TX] Chunk %u/%u | data=%u | packet=%u\n",
             static_cast<unsigned>(_chunkIndex + 1),
             static_cast<unsigned>(_chunkCount),
@@ -661,8 +672,8 @@ void processPendingConfigTransfer() {
         doc.clear();
         notifyEventJson(out);
 
-        Serial.println("[CONFIG TX] End sent");
-        Serial.println("========== CONFIG TRANSFER END ==========");
+        AL_INTERNAL_PRINTLN("[CONFIG TX] End sent");
+        AL_INTERNAL_PRINTLN("========== CONFIG TRANSFER END ==========");
     }
     return true;
 }
@@ -720,7 +731,7 @@ private:
 
   void onCommandWritten(BLECharacteristic* characteristic) {
     String json = characteristic->getValue().c_str();
-    Serial.printf("[BLE][RX] write bytes=%u heap8=%u largestBlock8=%u\n",
+    AL_INTERNAL_PRINTF("[BLE][RX] write bytes=%u heap8=%u largestBlock8=%u\n",
                   (unsigned)json.length(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     if (json.isEmpty()) return;
@@ -728,7 +739,7 @@ private:
     StaticJsonDocument<1024> doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
-      Serial.printf("[BLE][RX] JSON decode failed: %s heap=%u largestBlock=%u\n",
+      AL_INTERNAL_PRINTF("[BLE][RX] JSON decode failed: %s heap=%u largestBlock=%u\n",
                     err.c_str(), (unsigned)ESP.getFreeHeap(),
                     (unsigned)ESP.getMaxAllocHeap());
       doc.clear();
@@ -762,7 +773,7 @@ private:
     // Packet fields and rawJson own their data. Release the incoming JSON's
     // heap pool before the handler allocates any response documents.
     doc.clear();
-    Serial.printf(
+    AL_INTERNAL_PRINTF(
       "[BLE][RX] type=%u requestId=%u source=%s target=%s entity=%s command=%s payloadLen=%u rawLen=%u\n",
       _commandHandler->packet.msgType,
       _commandHandler->packet.requestId,
@@ -872,7 +883,7 @@ uint32_t onPassKeyRequest() override {
 
   uint32_t pin = ArmorLinkSecurity::getPin();
 
-  Serial.printf("[BLE] Passkey requested -> %06lu\n", (unsigned long)pin);
+  AL_INTERNAL_PRINTF("[BLE] Passkey requested -> %06lu\n", (unsigned long)pin);
 
   return pin;
 
@@ -880,14 +891,14 @@ uint32_t onPassKeyRequest() override {
 
   void onPassKeyNotify(uint32_t pass_key) override {
 
-    Serial.printf("[BLE] Passkey notify: %06lu\n", (unsigned long)pass_key);
+    AL_INTERNAL_PRINTF("[BLE] Passkey notify: %06lu\n", (unsigned long)pass_key);
 
   }
 bool onConfirmPIN(uint32_t pass_key) override {
 
   uint32_t pin = ArmorLinkSecurity::getPin();
 
-  Serial.printf("[BLE] Confirm PIN: received=%06lu expected=%06lu\n",
+  AL_INTERNAL_PRINTF("[BLE] Confirm PIN: received=%06lu expected=%06lu\n",
 
                 (unsigned long)pass_key,
 
@@ -907,12 +918,12 @@ bool onConfirmPIN(uint32_t pass_key) override {
 
     if (cmpl.success) {
 
-      Serial.printf("[BLE] Authentication successful: authMode=0x%02x\n",
+      AL_INTERNAL_PRINTF("[BLE] Authentication successful: authMode=0x%02x\n",
                     (unsigned)cmpl.auth_mode);
 
     } else {
 
-      Serial.printf("[BLE] Authentication failed: reason=0x%02x\n",
+      AL_INTERNAL_PRINTF("[BLE] Authentication failed: reason=0x%02x\n",
                     (unsigned)cmpl.fail_reason);
 
     }
@@ -1010,4 +1021,22 @@ inline void setupBleServer(const char* deviceName, ArmorLinkBleCommandHandler* h
   ArmorLinkBLE.begin(deviceName, handler);
 }
 
+
+#else
+#include <Arduino.h>
+#include "ArmorLinkProtocol.h"
+inline bool isBleClientConnected() { return false; }
+inline bool isBleLogStreamEnabled() { return false; }
+inline void setBleLogStreamEnabled(bool) {}
+inline void setBleConnectHook(void (*)()) {}
+inline void setBleDisconnectHook(void (*)()) {}
+inline void bleNotifyEventJson(const String&) {}
+inline void bleNotifyLogJson(const String&) {}
+inline bool bleQueueConfigJsonChunked(const char*, const char*, uint16_t, const String&, bool) { return false; }
+inline void bleProcessPendingConfigTransfer() {}
+inline void bleNotifyConfigJsonChunked(const char*, const char*, uint16_t, const String&, bool) {}
+inline void bleNotifyConfigBufferChunked(const char*, const char*, uint16_t, const char*, size_t, bool) {}
+template <typename TDocument>
+inline void bleNotifyConfigJsonDocumentChunked(const char*, const char*, uint16_t, const TDocument&, bool) {}
+#endif // ARMORLINK_HAS_BLE
 #endif

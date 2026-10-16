@@ -3,7 +3,7 @@
 #define ARMORLINK_H
 #include "ArmorLinkDebug.h"
 #include <ArduinoJson.h>
-#if defined(ESP32)
+#if defined(ESP32) && ARMORLINK_HAS_ESPNOW
   #include <esp_wifi.h>
 #endif
 #include "ArmorLinkModule.h"
@@ -13,8 +13,10 @@
 #include "ArmorLinkProtocol.h"
 #include "ArmorLinkTransportEspNow.h"
 #include "ArmorLinkBLE.h"
+#include "ArmorLinkSecurity.h"
+#include <esp_heap_caps.h>
 
-#if __has_include(<ESP32Servo.h>)
+#if ARMORLINK_HAS_WEB_SERIAL && __has_include(<ESP32Servo.h>)
   #include <ESP32Servo.h>
   #define ARMORLINK_HAS_ESP32_SERVO 1
 #else
@@ -26,7 +28,7 @@ struct ArmorLinkOptions {
   String bleName = "ArmorLink";
   uint8_t espNowChannel = 1;
   bool enableBle = false;
-  bool enableEspNow = true;
+  bool enableEspNow = ARMORLINK_HAS_ESPNOW;
   bool enableGateway = false;
   bool enableSerialLogging = true;
   bool syncLoggingStateOnModuleOnline = false;
@@ -172,7 +174,7 @@ private:
     bool boolValue = false;
   };
 
-  static constexpr size_t MAX_VALUES = 8;
+  static constexpr size_t MAX_VALUES = ARMORLINK_MAX_DATA_STREAM_VALUES;
 
   bool setFloatValue(const char* key, float value) {
     ValueEntry* entry = valueEntry(key);
@@ -290,11 +292,15 @@ public:
   }
 
   bool isModuleOnline(const String& macText) const {
+#if ARMORLINK_HAS_ESPNOW
     int index = findPresenceIndexByMac(macText);
     if (index < 0) {
       return false;
     }
     return _presenceStates[index].isOnline;
+#else
+    return false;
+#endif
   }
 
   void begin(ArmorLinkModule& module, const ArmorLinkOptions& options) {
@@ -306,13 +312,16 @@ public:
 
     _storage.begin(resolveNamespace(module, options));
     _storage.load(module);
+#if ARMORLINK_HAS_ACTIONBUILDER
     _storage.loadActionDefinitions(module);
+#endif
     applySystemConfig();
 
+#if ARMORLINK_HAS_BLE
     if(_options.enableBle){
       ArmorLinkBLE.begin(_options.bleName.c_str(), _module->name().c_str());
     }
-    
+#endif
     setGatewayMode(_options.enableGateway);
 
     String storedProfileName;
@@ -322,20 +331,19 @@ public:
         !storedProfileName.isEmpty()) {
       module.activeProfile(storedProfileIdentifier, storedProfileName);
     }
+#if ARMORLINK_HAS_ESPNOW
     _storage.loadPairingInfo(_pairingInfo);
     _pairedModuleCount = _storage.loadPairedModules(_pairedModules);
     syncPresenceStatesFromStoredModules();
 
-    // Keep the old, stable initialization model:
-    // ArmorLink prepares storage, handlers and the peer registry here.
-    // The sketch starts ESP-NOW explicitly via ArmorLink.transport().beginManaged(channel).
+    // Restore the registry before starting the managed transport below.
     _transport.setPeerRegistry(&_peers);
 
     for (size_t i = 0; i < _pairedModuleCount; ++i) {
       uint8_t mac[6];
       if (armorLinkParseMacString(String(_pairedModules[i].mac), mac)) {
         _peers.registerPeer(String(_pairedModules[i].name), mac);
-        Serial.printf("[PAIR][GW] Restored paired peer: %s (%s)\n",
+        AL_INTERNAL_PRINTF("[PAIR][GW] Restored paired peer: %s (%s)\n",
                       _pairedModules[i].name,
                       _pairedModules[i].mac);
       }
@@ -351,7 +359,7 @@ public:
         if (_options.defaultLogTarget.isEmpty()) {
           _options.defaultLogTarget = gatewayName;
         }
-        Serial.printf("[PAIR] Restored gateway: %s (%s)\n",
+        AL_INTERNAL_PRINTF("[PAIR] Restored gateway: %s (%s)\n",
                       gatewayName.c_str(),
                       _pairingInfo.gatewayMac);
       } else {
@@ -364,6 +372,7 @@ public:
     if (_options.defaultLogTarget.isEmpty()) {
       AL_VERBOSELN("[PAIR] No defaultLogTarget configured; remote logging/telemetry waits for a paired gateway");
     }
+#endif
     if (_options.enableSerialCommands ||
       _options.enableSerialMenu) {
       _serialRuntime.begin(
@@ -371,11 +380,12 @@ public:
           _module->serial()
       );
 
+#if ARMORLINK_HAS_WEB_SERIAL
       _serialRuntime.setInternalHandler(
           &ArmorLinkRuntime::handleFlasherSerialPayloadThunk,
           this
       );
-
+#endif
       _serialRuntime.setUnknownHandler(
           &ArmorLinkRuntime::handleUnknownSerialLineThunk,
           this
@@ -384,25 +394,50 @@ public:
     initStartupHelloState();
 
     _dispatch.begin(&module, &_storage);
+#if ARMORLINK_HAS_ACTIONBUILDER
+    _module->actionBuilder().onLog([this](ArmorLinkLogLevel level, const String& message) {
+      sendSimpleLog(level, message);
+    });
     _module->actionBuilder().onRemoteAction(
       [this](const String& target, const String& entity, const String& command) {
         return sendActionBuilderCommandToTarget(target, entity, command);
       });
+#endif
 
+#if ARMORLINK_HAS_ESPNOW
     _transport.setManagedHandlers(
       &ArmorLinkRuntime::handleManagedReceiveStatic,
       &ArmorLinkRuntime::handleManagedSendStatic
     );
-
+#endif
     setBleConnectHook(&ArmorLinkRuntime::handleBleConnectedStatic);
     setBleDisconnectHook(&ArmorLinkRuntime::handleBleDisconnectedStatic);
 
+#if ARMORLINK_HAS_ESPNOW
     if(_options.enableEspNow)
     {
-      _transport.beginManaged(_options.espNowChannel);      
+#if defined(ESP32) && ARMORLINK_HAS_BLE
+      if (_options.enableBle) {
+        // Hardware testing: an immediate start can lose ESP-NOW reception
+        // after the first TX. Allow BLE startup to settle before starting WiFi/ESP-NOW.
+        AL_INTERNAL_PRINTLN("[INFO] Waiting 2 seconds before ESP-NOW initialization (BLE + ESP-NOW startup).");
+        delay(2000);
+      }
+#endif
+      const bool espNowInitialized = _transport.beginManaged(_options.espNowChannel);
+      if (espNowInitialized) {
+        AL_INTERNAL_PRINTLN("[INFO] ArmorLink communication initialized.");
+      } else {
+        AL_INTERNAL_PRINTLN("[ERROR] ArmorLink ESP-NOW initialization failed.");
+      }
     }
+#endif
 
-    Serial.printf(
+#if ARMORLINK_HAS_ACTIONBUILDER
+    _module->actionBuilder().armStartup();
+#endif
+
+    AL_INTERNAL_PRINTF(
       "[INFO] ArmorLink %s loaded | module=%s | gateway=%s | ble=%s | espnow=%s | channel=%u\n",
       ARMORLINK_VERSION,
       _module != nullptr ? _module->name().c_str() : "unknown",
@@ -414,16 +449,28 @@ public:
   }
 
   void loop() {
+#if ARMORLINK_HAS_ESPNOW
+    if (_options.enableEspNow) {
+      _transport.processCallbacks();
+    }
+#endif
+#if ARMORLINK_HAS_ACTIONBUILDER
+    // The sketch's setup() has returned before the first loop() call.
+    if (_module != nullptr) _module->actionBuilder().runStartupOnce(_module->actions());
+#endif
     processPendingPairResponse();
     processLocalConfigTransfer();
     bleProcessPendingConfigTransfer();
     processEspNowQueue();
+#if ARMORLINK_HAS_ACTIONBUILDER
     if (_module != nullptr) {
       _module->actionBuilder().tick(_module->actions());
     }
+#endif
     remotePairingQuietTick();
     pairingQuietStopRepeatTick();
     pairingTick();
+    presenceProbeTick();
     presenceTick();
     startupHelloTick();
     startupStateSyncTick();
@@ -465,6 +512,8 @@ public:
   }
 
   bool queueLocalConfigTransfer(uint16_t requestId, const char* target) {
+#if ARMORLINK_HAS_BLE
+
     if (_localConfigTransferPending) {
       return false;
     }
@@ -476,9 +525,13 @@ public:
       sizeof(_localConfigTransferTarget),
       target ? target : "");
     return true;
+#else
+    return false;
+#endif
   }
 
   void processLocalConfigTransfer() {
+#if ARMORLINK_HAS_BLE
     if (!_localConfigTransferPending) {
       return;
     }
@@ -505,7 +558,7 @@ public:
     {
       size_t descriptorLength = 0;
       if (ArmorLinkDescriptor::measureBle(*_module, descriptorLength)) {
-        Serial.printf("[CONFIG] local descriptor length=%u | profile=ble\n",
+        AL_INTERNAL_PRINTF("[CONFIG] local descriptor length=%u | profile=ble\n",
                       static_cast<unsigned>(descriptorLength));
         const bool sent = ArmorLinkBLE.notifyConfigJsonStreamChunked(
           target,
@@ -527,6 +580,7 @@ public:
       "Config descriptor build failed",
       "Descriptor allocation failed"
     );
+#endif
   }
 
   ArmorLinkStorage& storage() {
@@ -558,6 +612,7 @@ public:
   }
 
 void setGatewayMode(bool enabled) {
+    enabled = ARMORLINK_HAS_ESPNOW && enabled;
   _isGatewayMode = enabled;
 
   if (_isGatewayMode) {
@@ -567,6 +622,7 @@ void setGatewayMode(bool enabled) {
     _lastStartupHelloMs = 0;
     _startupHelloAttempt = 0;
   }
+  if (_module != nullptr) registerSystemActions(*_module);
 }
 
   bool isGatewayMode() const {
@@ -577,11 +633,42 @@ void setGatewayMode(bool enabled) {
     return _pairingInfo.paired;
   }
 
-  // Only this node's gateway association. Config, profiles, actions and the
-  // gateway's paired-module list are deliberately left untouched.
+  // Reset only ESP-NOW associations for the current role. Bluetooth security,
+  // configuration, profiles and actions are always kept.
   bool resetPairingInfo() {
+#if ARMORLINK_HAS_ESPNOW
+    if (_isGatewayMode) {
+      if (!_storage.clearPairedModules()) {
+        AL_INTERNAL_PRINTLN("[PAIR][GW] Failed to reset paired-node list");
+        return false;
+      }
+      stopPairing();
+      clearPendingPairingCandidates();
+      // Notify reachable nodes before dropping their peer routing entries.
+      // Offline nodes still need their own pairing reset before pairing anew.
+      for (size_t i = 0; i < _pairedModuleCount; ++i) {
+        const auto& removed = _pairedModules[i];
+        uint8_t mac[6];
+        if (armorLinkParseMacString(String(removed.mac), mac)) {
+          ArmorLinkPacket out = makeArmorLinkBasePacket(
+              AL_MSG_COMMAND, _module ? _module->name().c_str() : "Gateway",
+              removed.name, "pairing", "unpair");
+          setArmorLinkPacketPayload(out, String(removed.mac));
+          const esp_err_t result = _transport.sendPacketToMac(mac, out);
+          AL_INTERNAL_PRINTF("[PAIR][GW] Reset: unpair sent to %s: %s\n", removed.name, esp_err_to_name(result));
+        }
+        _peers.removePeer(String(removed.name));
+        emitModuleUnpairedEvent(removed);
+      }
+      memset(_pairedModules, 0, sizeof(_pairedModules));
+      _pairedModuleCount = 0;
+      syncPresenceStatesFromStoredModules();
+      emitModulePresenceSnapshot();
+      AL_INTERNAL_PRINTLN("[PAIR][GW] All paired-node associations reset; other settings preserved");
+      return true;
+    }
     if (!_storage.clearPairingInfo()) {
-      Serial.println("[PAIR] Failed to reset pairing info");
+      AL_INTERNAL_PRINTLN("[PAIR] Failed to reset pairing info");
       return false;
     }
     _peers.removePeer(String(_pairingInfo.gatewayName));
@@ -592,8 +679,11 @@ void setGatewayMode(bool enabled) {
     _hasPendingPairResponse = false;
     clearRemotePairingQuiet(0);
     initStartupHelloState();
-    Serial.println("[PAIR] Pairing info reset; all other settings preserved");
+    AL_INTERNAL_PRINTLN("[PAIR] Pairing info reset; all other settings preserved");
     return true;
+#else
+    return false;
+#endif
   }
 
   const char* pairedGatewayName() const {
@@ -628,6 +718,9 @@ void onBleConnected() {
   if (_options.enableSerialLogging) {
     AL_VERBOSELN("[BLE] Client connected");
   }
+#if ARMORLINK_HAS_ESPNOW
+  if (_isGatewayMode && _options.enableEspNow) _presenceProbePending = true;
+#endif
   emitGatewayDescriptorEvent();
 }
   void emitGatewayDescriptorEvent() {
@@ -637,7 +730,7 @@ void onBleConnected() {
 
     StaticJsonDocument<512> doc;
     doc["type"] = "gateway_descriptor";
-    doc["projectName"] = ArmorLinkBLE.getProjectName();
+    doc["projectName"] = ArmorLinkSecurity::getProjectName();
 
     JsonObject module = doc.createNestedObject("module");
     module["name"] = _module->name();
@@ -650,7 +743,7 @@ void onBleConnected() {
     doc["bleName"] = _options.bleName;
 
     if (doc.overflowed()) {
-      Serial.printf("[BLE][TX] gateway_descriptor allocation failed: heap8=%u largestBlock8=%u\n",
+      AL_INTERNAL_PRINTF("[BLE][TX] gateway_descriptor allocation failed: heap8=%u largestBlock8=%u\n",
                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
       return;
@@ -658,7 +751,7 @@ void onBleConnected() {
     String out;
     serializeJson(doc, out);
     doc.clear();
-    Serial.printf("[BLE][TX] gateway_descriptor bytes=%u\n",
+    AL_INTERNAL_PRINTF("[BLE][TX] gateway_descriptor bytes=%u\n",
                   static_cast<unsigned>(out.length()));
     bleNotifyEventJson(out);
   }
@@ -682,6 +775,7 @@ void onBleDisconnected() {
 }
 
   void sendGatewayStatePacketToPairedModules(ArmorLinkPacket& packet) {
+#if ARMORLINK_HAS_ESPNOW
     if (!_isGatewayMode || !_options.enableEspNow) return;
     if (_pairingActive) return;
 
@@ -700,6 +794,7 @@ void onBleDisconnected() {
       delay(5);
       yield();
     }
+#endif
   }
 
   void broadcastTelemetryState(bool enabled) {
@@ -785,13 +880,14 @@ void onBleDisconnected() {
       }
     }
 
-    Serial.printf("[PAIR][GW] Pairing quiet %s broadcast | sessionId=%u | result=%s\n",
+    AL_INTERNAL_PRINTF("[PAIR][GW] Pairing quiet %s broadcast | sessionId=%u | result=%s\n",
                   active ? "start" : "stop",
                   sessionId,
                   esp_err_to_name(result));
   }
 
   bool startPairing(uint32_t timeoutMs = 30000) {
+#if ARMORLINK_HAS_ESPNOW
     if (!_isGatewayMode) {
       return false;
     }
@@ -811,7 +907,7 @@ void onBleDisconnected() {
     _pairingQuietStopRepeatUntilMs = 0;
     _lastPairingQuietStopMs = 0;
 
-    Serial.printf("[PAIR][GW] Pairing started | sessionId=%u | timeoutMs=%lu\n",
+    AL_INTERNAL_PRINTF("[PAIR][GW] Pairing started | sessionId=%u | timeoutMs=%lu\n",
                   _pairingSessionId,
                   (unsigned long)timeoutMs);
 
@@ -825,9 +921,13 @@ void onBleDisconnected() {
     }
 
     return ok;
+#else
+    return false;
+#endif
   }
 
   void stopPairing() {
+#if ARMORLINK_HAS_ESPNOW
     if (!_pairingActive && _pairingSessionId == 0) {
       return;
     }
@@ -842,19 +942,29 @@ void onBleDisconnected() {
     clearPendingPairingCandidates();
     schedulePairingQuietStopRepeat(stoppedSessionId);
 
-    Serial.printf("[PAIR][GW] Pairing stopped | sessionId=%u\n", stoppedSessionId);
+    AL_INTERNAL_PRINTF("[PAIR][GW] Pairing stopped | sessionId=%u\n", stoppedSessionId);
     emitPairingStateEvent("pairing_stopped", stoppedSessionId);
+#endif
   }
 
   size_t pairingCandidateCount() const {
+#if ARMORLINK_HAS_ESPNOW
     return _pendingCandidateCount;
+#else
+    return 0;
+#endif
   }
 
   const ArmorLinkPairingCandidate* pairingCandidates() const {
+#if ARMORLINK_HAS_ESPNOW
     return _pendingCandidates;
+#else
+    return nullptr;
+#endif
   }
 
   bool acceptPairingCandidate(const String& macText) {
+#if ARMORLINK_HAS_ESPNOW
     if (!_isGatewayMode) {
       return false;
     }
@@ -888,7 +998,7 @@ void onBleDisconnected() {
     );
     setArmorLinkPacketPayload(out, payload);
 
-    Serial.printf("[PAIR][GW] Accepting candidate: %s | %s | %s\n",
+    AL_INTERNAL_PRINTF("[PAIR][GW] Accepting candidate: %s | %s | %s\n",
                   _pendingCandidates[index].name,
                   _pendingCandidates[index].type,
                   _pendingCandidates[index].mac);
@@ -904,7 +1014,7 @@ void onBleDisconnected() {
       }
     }
 
-    Serial.print("[PAIR][GW] Pair accept send result: ");
+    AL_INTERNAL_PRINT("[PAIR][GW] Pair accept send result: ");
     AL_VERBOSE(esp_err_to_name(sendResult));
 
     if (sendResult != ESP_OK) {
@@ -931,6 +1041,9 @@ void onBleDisconnected() {
     stopPairing();
     emitModulePresenceSnapshot();
     return true;
+#else
+    return false;
+#endif
   }
   ArmorLinkTelemetryBuilder telemetryGroup(const char* group, const char* name) {
     return ArmorLinkTelemetryBuilder(this, group, name);
@@ -941,6 +1054,7 @@ void onBleDisconnected() {
   }
 
   bool subscribeDataStream(const char* source, const char* stream) {
+#if ARMORLINK_HAS_DATASTREAMS
     if (stream == nullptr || strlen(stream) == 0) {
       return false;
     }
@@ -957,9 +1071,13 @@ void onBleDisconnected() {
     }
 
     return sendDataStreamSubscription(normalizedSource, stream, true) == ESP_OK;
+#else
+    return false;
+#endif
   }
 
   bool unsubscribeDataStream(const char* source, const char* stream) {
+#if ARMORLINK_HAS_DATASTREAMS
     if (stream == nullptr || strlen(stream) == 0) {
       return false;
     }
@@ -976,9 +1094,13 @@ void onBleDisconnected() {
     }
 
     return sendDataStreamSubscription(normalizedSource, stream, false) == ESP_OK;
+#else
+    return false;
+#endif
   }
 
   bool onDataStream(const char* stream, ArmorLinkDataStreamHandler handler) {
+#if ARMORLINK_HAS_DATASTREAMS
     if (stream == nullptr || strlen(stream) == 0 || !handler) {
       return false;
     }
@@ -986,7 +1108,9 @@ void onBleDisconnected() {
     for (size_t i = 0; i < MAX_DATA_STREAM_HANDLERS; ++i) {
       if (_dataStreamHandlers[i].occupied &&
           String(_dataStreamHandlers[i].stream).equalsIgnoreCase(stream)) {
+#if ARMORLINK_HAS_DATASTREAMS
         _dataStreamHandlers[i].handler = handler;
+#endif
         return true;
       }
     }
@@ -997,13 +1121,18 @@ void onBleDisconnected() {
         armorlinkCopyString(_dataStreamHandlers[i].stream,
                             sizeof(_dataStreamHandlers[i].stream),
                             stream);
+#if ARMORLINK_HAS_DATASTREAMS
         _dataStreamHandlers[i].handler = handler;
+#endif
         return true;
       }
     }
 
-    Serial.printf("[STREAM] No handler slot available for %s\n", stream);
+    AL_INTERNAL_PRINTF("[STREAM] No handler slot available for %s\n", stream);
     return false;
+#else
+    return false;
+#endif
   }
 
   esp_err_t sendCommand(
@@ -1130,6 +1259,11 @@ void onBleDisconnected() {
       return ESP_OK;
     }
 
+#if !ARMORLINK_HAS_ESPNOW
+    notifyLocalBleLog(sourceName, level, entity, command, message,
+                      valueInt, valueFloat, batteryVoltage);
+    return ESP_OK;
+#else
     if (_options.defaultLogTarget.isEmpty()) {
       return ESP_ERR_NOT_FOUND;
     }
@@ -1151,6 +1285,7 @@ void onBleDisconnected() {
       valueFloat,
       batteryVoltage
     );
+#endif
   }
 
   void logModule(
@@ -1170,44 +1305,15 @@ void onBleDisconnected() {
                   command ? command : "",
                   message.c_str());
 
-    if (!isBleLogStreamEnabled()) {
-      return;
-    }
-    if (level < _remoteLogLevel) {
-      return;
-    }
-    StaticJsonDocument<384> doc;
-    doc["type"] = "log";
-    doc["level"] = armorLinkLogLevelToString(level);
-    doc["source"] = source ? source : "";
-    doc["entity"] = entity ? entity : "";
-    doc["command"] = command ? command : "";
-    doc["message"] = message;
-    doc["valueInt"] = valueInt;
-    doc["valueFloat"] = valueFloat;
-    doc["batteryVoltage"] = batteryVoltage;
-
-    String out;
-    serializeJson(doc, out);
-    doc.clear();
-    bleNotifyLogJson(out);
-  }
+    notifyLocalBleLog(source, level, entity, command, message,
+                      valueInt, valueFloat, batteryVoltage);
+}
   void onEspNowDataReceived(const uint8_t* data, int len) {
+#if ARMORLINK_HAS_ESPNOW
     ArmorLinkPacket incoming{};
     if (!_transport.decodeIncomingPacket(data, len, incoming)) {
-      logWarn("espnow", "decode", String("Invalid packet length/version: ") + len);
+      _transport.recordReceiveError(true);
       return;
-    }
-
-    if (_isGatewayMode) {
-      Serial.printf("[ESPNOW][GW][RX] len=%d type=%u source=%s target=%s entity=%s command=%s payloadLen=%u\n",
-                    len,
-                    incoming.msgType,
-                    incoming.source,
-                    incoming.target,
-                    incoming.entity,
-                    incoming.command,
-                    incoming.payloadLen);
     }
 
     if (_isGatewayMode &&
@@ -1219,23 +1325,33 @@ void onBleDisconnected() {
     }
 
     if (!_transport.enqueueReceivedPacket(incoming)) {
-      logWarn("espnow", "queue", "ESP-NOW queue full");
+      _transport.recordReceiveError(false);
     }
+#endif
   }
 
   void onEspNowSendStatus(const uint8_t* /*mac_addr*/, esp_now_send_status_t status) {
-    Serial.printf("[ESPNOW][TX] status=%s\n",
+#if ARMORLINK_HAS_ESPNOW
+    AL_INTERNAL_PRINTF("[ESPNOW][TX] status=%s\n",
                   status == ESP_NOW_SEND_SUCCESS ? "success" : "fail");
+#endif
   }
 
   void processEspNowQueue() {
+#if ARMORLINK_HAS_ESPNOW
     ArmorLinkPacket msg;
     while (_transport.dequeueReceivedPacket(msg)) {
+      if (_isGatewayMode) {
+        AL_INTERNAL_PRINTF("[ESPNOW][GW][RX] type=%u source=%s target=%s entity=%s command=%s payloadLen=%u\n",
+          msg.msgType, msg.source, msg.target, msg.entity, msg.command, msg.payloadLen);
+      }
       processIncomingEspNowPacket(msg);
     }
+#endif
   }
 
   void processPendingPairResponse() {
+#if ARMORLINK_HAS_ESPNOW
     if (!_hasPendingPairResponse) {
       return;
     }
@@ -1243,15 +1359,17 @@ void onBleDisconnected() {
     ArmorLinkPacket msg = _pendingPairResponse;
     _hasPendingPairResponse = false;
 
-    Serial.printf("[PAIR][GW] Pair response received from %s | entity=%s | command=%s | payload=%s\n",
+    AL_INTERNAL_PRINTF("[PAIR][GW] Pair response received from %s | entity=%s | command=%s | payload=%s\n",
                   msg.source,
                   msg.entity,
                   msg.command,
                   armorLinkPacketPayloadToString(msg).c_str());
     handlePairResponsePacket(msg);
+#endif
   }
 
   void printLocalMac() const {
+#if ARMORLINK_HAS_ESPNOW
 #if defined(ESP32)
     uint8_t mac[6];
     esp_wifi_get_mac(WIFI_IF_STA, mac);
@@ -1261,6 +1379,7 @@ void onBleDisconnected() {
     Serial.printf("?? ESP8266 MAC: %s\n", WiFi.macAddress().c_str());
 #else
     AL_VERBOSELN("?? Local MAC unavailable on this platform");
+#endif
 #endif
   }
 
@@ -1296,12 +1415,12 @@ void onBleDisconnected() {
       doc["type"] = "status";
 
       JsonObject security = doc.createNestedObject("security");
-      security["mode"] = ArmorLinkBLE.isPinSet() ? "secure" : "setup";
-      security["pinSet"] = ArmorLinkBLE.isPinSet();
-      doc["projectName"] = ArmorLinkBLE.getProjectName();
+      security["mode"] = ArmorLinkSecurity::isPinSet() ? "secure" : "setup";
+      security["pinSet"] = ArmorLinkSecurity::isPinSet();
+      doc["projectName"] = ArmorLinkSecurity::getProjectName();
 
       if (doc.overflowed()) {
-        Serial.printf("[BLE][TX] security status allocation failed: heap8=%u largestBlock8=%u\n",
+        AL_INTERNAL_PRINTF("[BLE][TX] security status allocation failed: heap8=%u largestBlock8=%u\n",
                       (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         notifyEventJson("{\"type\":\"error\",\"message\":\"Security status allocation failed\"}");
@@ -1311,7 +1430,7 @@ void onBleDisconnected() {
       serializeJson(doc, out);
       // Do not retain this pool while constructing the gateway descriptor.
       doc.clear();
-      Serial.printf("[BLE][TX] status bytes=%u\n",
+      AL_INTERNAL_PRINTF("[BLE][TX] status bytes=%u\n",
                     static_cast<unsigned>(out.length()));
       notifyEventJson(out);
 
@@ -1324,7 +1443,7 @@ void onBleDisconnected() {
     if (packet.msgType == AL_MSG_COMMAND &&
         equalsIgnoreCase(packet.command, "set_ble_pin")) {
 
-      if (ArmorLinkBLE.isPinSet()) {
+      if (ArmorLinkSecurity::isPinSet()) {
         notifyError(packet.requestId, "PIN already set", "");
         return true;
       }
@@ -1344,10 +1463,10 @@ void onBleDisconnected() {
       if (deserializeJson(setupDoc, payload) == DeserializationError::Ok) {
         const char* projectName = setupDoc["projectName"] | "";
         if (strlen(projectName) > 0) {
-          ArmorLinkBLE.saveProjectName(String(projectName));
+          ArmorLinkSecurity::saveProjectName(String(projectName));
         }
       }
-      if (!ArmorLinkBLE.savePin((uint32_t)pin)) {
+      if (!ArmorLinkSecurity::savePin((uint32_t)pin)) {
         notifyError(packet.requestId, "Failed to save PIN", "");
         return true;
       }
@@ -1370,7 +1489,7 @@ void onBleDisconnected() {
     const char* securityEntity,
     void (*notifyError)(uint16_t, const String&, const String&))
   {
-    if (ArmorLinkBLE.isPinSet()) {
+    if (ArmorLinkSecurity::isPinSet()) {
       return false;
     }
 
@@ -1471,7 +1590,7 @@ void onBleDisconnected() {
       if (_isGatewayMode && _pairedModuleCount > 0) {
         _remoteLoggingEnabled = enabled;
         broadcastLoggingState(enabled);
-      } else if (_isGatewayMode) {
+      } else if (_isGatewayMode || !ARMORLINK_HAS_ESPNOW) {
         _remoteLoggingEnabled = enabled;
       }
 
@@ -1487,6 +1606,9 @@ void onBleDisconnected() {
         equalsIgnoreCase(packet.entity, "presence") &&
         equalsIgnoreCase(packet.command, "snapshot")) {
 
+#if ARMORLINK_HAS_ESPNOW
+      if (_isGatewayMode && _options.enableEspNow) _presenceProbePending = true;
+#endif
       emitModulePresenceSnapshot();
       notifyAck(packet.requestId, "ok", "Presence snapshot sent");
       return true;
@@ -1578,7 +1700,7 @@ void onBleDisconnected() {
       out.flags = packet.flags;
 
       esp_err_t result = _transport.sendPacketToTarget(String(packet.target), out);
-      Serial.printf("[CONFIG][GW] forward get requestId=%u source=%s target=%s entity=%s -> %s\n",
+      AL_INTERNAL_PRINTF("[CONFIG][GW] forward get requestId=%u source=%s target=%s entity=%s -> %s\n",
                     out.requestId,
                     out.source,
                     out.target,
@@ -1702,6 +1824,7 @@ void onBleDisconnected() {
     if (packet.msgType == AL_MSG_COMMAND &&
         (equalsIgnoreCase(packet.target, localTarget) || equalsIgnoreCase(packet.target, "*"))) {
 
+#if ARMORLINK_HAS_ACTIONBUILDER
       if (_module != nullptr) {
         const String actionEntity = String(packet.entity);
         const String actionCommand = String(packet.command);
@@ -1722,7 +1845,7 @@ void onBleDisconnected() {
           return true;
         }
       }
-
+#endif
       auto actionResult = _dispatch.handleAction(String(packet.entity), String(packet.command));
       if (actionResult == ArmorLinkDispatchResult::Ok) {
         if (!equalsIgnoreCase(packet.target, "*")) {
@@ -1794,7 +1917,7 @@ void onBleDisconnected() {
     String payload;
     serializeJson(doc, payload);
 
-    if (_isGatewayMode) {
+    if (_isGatewayMode || !ARMORLINK_HAS_ESPNOW) {
       bleNotifyEventJson(payload);
       emitSerialEventJson(payload);
       return ESP_OK;
@@ -1871,6 +1994,38 @@ void onBleDisconnected() {
   }
 
 private:
+  void notifyLocalBleLog(
+    const char* source,
+    uint8_t level,
+    const char* entity,
+    const char* command,
+    const String& message,
+    int32_t valueInt,
+    float valueFloat,
+    float batteryVoltage) {
+    if (!isBleLogStreamEnabled()) {
+      return;
+    }
+    if (level < _remoteLogLevel) {
+      return;
+    }
+    StaticJsonDocument<384> doc;
+    doc["type"] = "log";
+    doc["level"] = armorLinkLogLevelToString(level);
+    doc["source"] = source ? source : "";
+    doc["entity"] = entity ? entity : "";
+    doc["command"] = command ? command : "";
+    doc["message"] = message;
+    doc["valueInt"] = valueInt;
+    doc["valueFloat"] = valueFloat;
+    doc["batteryVoltage"] = batteryVoltage;
+
+    String out;
+    serializeJson(doc, out);
+    doc.clear();
+    bleNotifyLogJson(out);
+  }
+
   uint16_t _lastRespondedPairSessionId = 0;
   uint32_t _lastPairResponseMs = 0;
   ArmorLinkModule* _module = nullptr;
@@ -1891,8 +2046,10 @@ private:
   bool _localConfigTransferActive = false;
   uint16_t _localConfigTransferRequestId = 0;
   char _localConfigTransferTarget[ARMORLINK_NAME_MAX_LEN + 1] = { 0 };
+#if ARMORLINK_HAS_ESPNOW
   ArmorLinkPacket _pendingPairResponse{};
   volatile bool _hasPendingPairResponse = false;
+#endif
   bool _remoteTelemetryEnabled = false;
   uint32_t _telemetryMinIntervalMs = 100;
   bool _serialRebootRequested = false;
@@ -1935,6 +2092,7 @@ private:
           .rebootRequired();
     }
 
+#if ARMORLINK_HAS_ESPNOW
     if (!module.config().containsKey("bridgeMode")) {
       module.config().addBool("bridgeMode", &_systemConfig.gatewayMode, _systemConfig.gatewayMode)
           .label("Gateway Mode").section("ArmorLink")
@@ -1946,7 +2104,8 @@ private:
           })
           .rebootRequired();
     }
-
+#endif
+#if ARMORLINK_HAS_BLE
     if (!module.config().containsKey("bluetoothSetup")) {
       module.config().addBool("bluetoothSetup", &_systemConfig.bluetoothEnabled, _systemConfig.bluetoothEnabled)
           .label("Enable Bluetooth").section("ArmorLink")
@@ -1961,7 +2120,8 @@ private:
           .visibleWhen("bluetoothSetup", true)
           .rebootRequired();
     }
-
+#endif
+#if ARMORLINK_HAS_ESPNOW
     if (!module.config().containsKey("nodeLink")) {
       module.config().addBool("nodeLink", &_systemConfig.wirelessEnabled, _systemConfig.wirelessEnabled)
           .label("Enable Wireless Communication").section("ArmorLink")
@@ -1978,25 +2138,35 @@ private:
           .rebootRequired()
           .range(1, 13).step(1);
     }
+#endif
   }
 
   void registerSystemActions(ArmorLinkModule& module) {
-    // Reuse the reserved action if begin() is called again.
+#if ARMORLINK_HAS_ESPNOW
+    const char* confirmation = _isGatewayMode
+        ? "Remove all ESP-NOW node pairings from this gateway? Reachable nodes will be notified. Offline nodes may need their pairing reset separately. Bluetooth PIN, settings, profiles and Actions are kept."
+        : "Remove this node's gateway pairing so it can connect to a new gateway? Bluetooth PIN, settings, profiles and Actions are kept.";
+    const char* description = _isGatewayMode
+        ? "Remove all paired ESP-NOW nodes from this gateway."
+        : "Remove only this node's gateway pairing.";
+    // Reuse the reserved action and refresh its text when the runtime role changes.
     ArmorLinkActionDef* existing = findAction("pairing", "reset");
     if (existing != nullptr) {
       existing->label = "Reset Pairing info";
       existing->section = "ArmorLink";
       existing->enabled = true;
-      existing->confirmText = "Reset this node's gateway pairing? The node will need to be paired again. All other settings will be kept.";
+      existing->description = description;
+      existing->confirmText = confirmation;
       existing->callback = [this]() { resetPairingInfo(); };
       return;
     }
     module.actions().add("resetPairingInfo")
         .label("Reset Pairing info").section("ArmorLink")
-        .description("Remove only this node's gateway pairing. All other settings are kept.")
+        .description(description)
         .command("pairing", "reset")
-        .confirm("Reset this node's gateway pairing? The node will need to be paired again. All other settings will be kept.")
+        .confirm(confirmation)
         .onExecute([this]() { resetPairingInfo(); });
+#endif
   }
 
   void applySystemConfig() {
@@ -2016,6 +2186,9 @@ private:
     }
 
     _module->name(_systemConfig.nodeName);
+    _systemConfig.gatewayMode = ARMORLINK_HAS_ESPNOW && _systemConfig.gatewayMode;
+    _systemConfig.wirelessEnabled = ARMORLINK_HAS_ESPNOW && _systemConfig.wirelessEnabled;
+    _systemConfig.bluetoothEnabled = ARMORLINK_HAS_BLE && _systemConfig.bluetoothEnabled;
     _options.enableGateway = _systemConfig.gatewayMode;
     _options.enableBle = _systemConfig.bluetoothEnabled;
     _options.bleName = _systemConfig.bluetoothName;
@@ -2067,7 +2240,7 @@ private:
           return;
       }
 
-      Serial.println("[SYSTEM] Restarting now");
+      AL_INTERNAL_PRINTLN("[SYSTEM] Restarting now");
       Serial.flush();
       ESP.restart();
   }
@@ -2096,9 +2269,20 @@ private:
           : false;
   }
 
+#if ARMORLINK_HAS_WEB_SERIAL
+  bool _serialWebClientActive = false;
+  uint32_t _serialWebClientLastSeenMs = 0;
+
+  bool isSerialWebClientActive() const {
+    return _serialWebClientActive &&
+        (uint32_t)(millis() - _serialWebClientLastSeenMs) < 30000UL;
+  }
+#endif
+
  bool handleFlasherSerialPayload(
     const String& payload
   ) {
+#if ARMORLINK_HAS_WEB_SERIAL
       if (payload.isEmpty()) {
           sendSerialFlasherError(
               0,
@@ -2124,6 +2308,18 @@ private:
 
       const String type =
           String((const char*)(doc["type"] | ""));
+
+      if (type.equalsIgnoreCase("session_close")) {
+          _serialWebClientActive = false;
+          return true;
+      }
+      // Any valid protocol request also starts/renews the session, preserving
+      // compatibility with clients that do not yet send explicit keepalives.
+      _serialWebClientActive = true;
+      _serialWebClientLastSeenMs = millis();
+      if (type.equalsIgnoreCase("session_open") || type.equalsIgnoreCase("session_ping")) {
+          return true;
+      }
 
       const uint16_t requestId =
           doc["requestId"] | 0;
@@ -2206,6 +2402,9 @@ private:
       );
 
       return true;
+#else
+    return false;
+#endif
   }
 ArmorLinkActionDef* findAction(
     const String& entity,
@@ -2401,8 +2600,7 @@ void sendSerialActionAck(
     String json;
     serializeJson(doc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 }
 
 void sendSerialConfigSetAck(
@@ -2431,8 +2629,7 @@ void sendSerialConfigSetAck(
     String json;
     serializeJson(doc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 }
 void sendSerialConfigSetAck(
     uint16_t requestId,
@@ -2487,8 +2684,7 @@ void sendSerialConfigSetAck(
     String json;
     serializeJson(doc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 }
 
 void sendSerialServoMoveAck(
@@ -2513,8 +2709,7 @@ void sendSerialServoMoveAck(
     String json;
     serializeJson(doc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 }
 
 void sendSerialActionDefinitionAck(
@@ -2534,8 +2729,7 @@ void sendSerialActionDefinitionAck(
     String json;
     serializeJson(doc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 }
 
 void sendSerialActionDefinitionDeleteAck(
@@ -2555,8 +2749,7 @@ void sendSerialActionDefinitionDeleteAck(
     String json;
     serializeJson(doc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 }
 
 void sendSerialActionComponentAck(
@@ -2576,8 +2769,7 @@ void sendSerialActionComponentAck(
     String json;
     serializeJson(doc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 }
 
 void sendSerialActionComponentDeleteAck(
@@ -2595,14 +2787,14 @@ void sendSerialActionComponentDeleteAck(
     String json;
     serializeJson(doc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 }
 
 bool handleSerialActionComponentSet(
     JsonDocument& doc,
     uint16_t requestId
 ) {
+#if ARMORLINK_HAS_ACTIONBUILDER
     if (_module == nullptr) {
         sendSerialFlasherError(
             requestId,
@@ -2766,12 +2958,16 @@ bool handleSerialActionComponentSet(
 
     sendSerialActionComponentAck(requestId, component);
     return true;
-}
+#else
+    sendSerialFlasherError(requestId, "unsupported_feature", "Dynamic actions are excluded from this firmware"); return true;
+#endif
+  }
 
 bool handleSerialActionComponentDelete(
     JsonDocument& doc,
     uint16_t requestId
 ) {
+#if ARMORLINK_HAS_ACTIONBUILDER
     if (_module == nullptr) {
         sendSerialFlasherError(
             requestId,
@@ -2827,13 +3023,17 @@ bool handleSerialActionComponentDelete(
 
     sendSerialActionComponentDeleteAck(requestId, id);
     return true;
-}
+#else
+    sendSerialFlasherError(requestId, "unsupported_feature", "Dynamic actions are excluded from this firmware"); return true;
+#endif
+  }
 
 bool handleSerialActionDefinitionSet(
     JsonDocument& doc,
     uint16_t requestId,
     bool preview = false
 ) {
+#if ARMORLINK_HAS_ACTIONBUILDER
     if (_module == nullptr) {
         sendSerialFlasherError(
             requestId,
@@ -2880,6 +3080,13 @@ bool handleSerialActionDefinitionSet(
     if (definition.section.isEmpty()) {
         definition.section = String(
             (const char*)(definitionJson["s"] | ""));
+    }
+
+    const auto* existingDefinition = _module->actionBuilder().findDefinition(definition.entity, definition.command);
+    definition.startup = definitionJson["startup"] | (existingDefinition != nullptr && existingDefinition->startup);
+    if (definition.startup && (definition.entity.indexOf('|') >= 0 || definition.command.indexOf('|') >= 0)) {
+        sendSerialFlasherError(requestId, "invalid_action", "Startup action identity must not contain a pipe character");
+        return true;
     }
 
     if (definition.entity.isEmpty() || definition.command.isEmpty()) {
@@ -2937,7 +3144,28 @@ bool handleSerialActionDefinitionSet(
             opName = String((const char*)(opJson["o"] | ""));
         }
 
-        if (opName.equalsIgnoreCase("wait")) {
+        if (opName.equalsIgnoreCase("log_message")) {
+            String text = String((const char*)(opJson["text"] | ""));
+            String level = String((const char*)(opJson["level"] | "info"));
+            ArmorLinkLogLevel logLevel;
+            if (level == "debug") logLevel = AL_LOG_DEBUG;
+            else if (level == "info") logLevel = AL_LOG_INFO;
+            else if (level == "warn") logLevel = AL_LOG_WARN;
+            else if (level == "error") logLevel = AL_LOG_ERROR;
+            else {
+                sendSerialFlasherError(requestId, "invalid_operation", "Log Message requires debug, info, warn or error");
+                return true;
+            }
+            if (text.isEmpty() || text.length() > 128) {
+                sendSerialFlasherError(requestId, "invalid_operation", "Log Message text must contain 1 to 128 UTF-8 bytes");
+                return true;
+            }
+            auto message = std::make_shared<ArmorLinkActionLogMessage>();
+            message->level = logLevel;
+            message->text = text;
+            op.code = ArmorLinkActionOpCode::LogMessage;
+            op.logMessage = message;
+        } else if (opName.equalsIgnoreCase("wait")) {
             op.code = ArmorLinkActionOpCode::Wait;
             op.componentIndex = 0xFF;
             int durationMs = opJson["durationMs"] | 0;
@@ -3086,6 +3314,16 @@ bool handleSerialActionDefinitionSet(
 
         definition.ops.push_back(op);
     }
+    for (const auto& op : definition.ops) {
+        if (op.code == ArmorLinkActionOpCode::LogMessage) {
+            String ignored;
+            if (!_module->actionBuilder().renderLogMessage(op.logMessage->text, ignored, false)) {
+                sendSerialFlasherError(requestId, "invalid_operation", "Log Message contains an unknown or invalid {state:id} placeholder");
+                return true;
+            }
+        }
+    }
+
 
     if (_module->actionBuilder().wouldCreateCycle(_module->actions(), definition)) {
         sendSerialFlasherError(
@@ -3106,11 +3344,11 @@ bool handleSerialActionDefinitionSet(
         return true;
     }
 
-    if (!_module->actionBuilder().setDefinition(definition) ||
-        !_storage.saveActionDefinition(
+    if (!_storage.saveActionDefinition(
             definition,
             isCustomAction,
-            &_module->actionBuilder())) {
+            &_module->actionBuilder()) ||
+        !_module->actionBuilder().setDefinition(definition)) {
         sendSerialFlasherError(
             requestId,
             "storage_error",
@@ -3122,12 +3360,16 @@ bool handleSerialActionDefinitionSet(
 
     sendSerialActionDefinitionAck(requestId, definition);
     return true;
-}
+#else
+    sendSerialFlasherError(requestId, "unsupported_feature", "Dynamic actions are excluded from this firmware"); return true;
+#endif
+  }
 
 bool handleSerialActionDefinitionDelete(
     JsonDocument& doc,
     uint16_t requestId
 ) {
+#if ARMORLINK_HAS_ACTIONBUILDER
     if (_module == nullptr) {
         sendSerialFlasherError(
             requestId,
@@ -3186,7 +3428,10 @@ bool handleSerialActionDefinitionDelete(
 
     sendSerialActionDefinitionDeleteAck(requestId, entity, command);
     return true;
-}
+#else
+    sendSerialFlasherError(requestId, "unsupported_feature", "Dynamic actions are excluded from this firmware"); return true;
+#endif
+  }
 
 ArmorLinkActionOpCode actionOpCodeFromString(const String& opName) const {
     if (opName.equalsIgnoreCase("servo_open")) return ArmorLinkActionOpCode::ServoOpen;
@@ -3321,13 +3566,14 @@ bool handleSerialActionExecute(
             command
         );
 
+#if ARMORLINK_HAS_ACTIONBUILDER
     if (action == nullptr) {
         action = _module->actionBuilder().findCustomAction(
             entity,
             command
         );
     }
-
+#endif
     if (action == nullptr) {
         sendSerialFlasherError(
             requestId,
@@ -3352,6 +3598,7 @@ bool handleSerialActionExecute(
         return true;
     }
 
+#if ARMORLINK_HAS_ACTIONBUILDER
     const bool hasActionDefinition =
         _module->actionBuilder().findDefinition(action->entity, action->command) != nullptr;
 
@@ -3373,7 +3620,7 @@ bool handleSerialActionExecute(
 
         return true;
     }
-
+#endif
     if (!action->callback) {
         sendSerialFlasherError(
             requestId,
@@ -4102,8 +4349,7 @@ bool handleSerialProfileSet(
     String json;
     serializeJson(outDoc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 
     return true;
 }
@@ -4123,8 +4369,7 @@ void sendSerialFlasherAck(
     String json;
     serializeJson(doc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 }
 
 bool handleSerialCommand(
@@ -4272,99 +4517,113 @@ bool handleSerialConfigGet(
     );
 }
 
+// A bounded sink shared by the measuring and sending passes. Never retains
+// the complete descriptor; chunks are independently valid UTF-8 strings.
 class ArmorLinkSerialDescriptorPrint : public Print {
 public:
-    ArmorLinkSerialDescriptorPrint(Print& out, size_t chunkSize)
-        : _out(out),
-          _chunkSize(chunkSize) {
-        _buffer.reserve(chunkSize);
-    }
+    using ChunkHandler = std::function<void(const char*)>;
+    explicit ArmorLinkSerialDescriptorPrint(ChunkHandler handler = {}) : _handler(handler) {}
 
     size_t write(uint8_t value) override {
-        _buffer += static_cast<char>(value);
-
-        if (_buffer.length() >= _chunkSize) {
-            flushChunk();
+        if (_size == ChunkSize) {
+            size_t end = _size;
+            if ((value & 0xC0) == 0x80) {
+                // The next byte continues the codepoint at the buffer's tail.
+                do { --end; } while (end > 0 && (static_cast<uint8_t>(_buffer[end]) & 0xC0) == 0x80);
+            }
+            flushPrefix(end);
         }
-
+        _buffer[_size++] = static_cast<char>(value);
+        _length++;
+        _hash = (_hash ^ value) * 16777619u;
         return 1;
     }
 
     size_t write(const uint8_t* buffer, size_t size) override {
-        size_t written = 0;
-
-        for (size_t i = 0; i < size; ++i) {
-            written += write(buffer[i]);
-        }
-
-        return written;
+        for (size_t i = 0; i < size; ++i) write(buffer[i]);
+        return size;
     }
 
-    void flushChunk() {
-        if (_buffer.isEmpty()) {
-            return;
-        }
-
-        _out.println(_buffer);
-        _buffer = "";
-    }
+    void finish() { if (_size > 0) flushPrefix(_size); }
+    size_t length() const { return _length; }
+    size_t chunks() const { return _chunks; }
+    uint32_t hash() const { return _hash; }
 
 private:
-    Print& _out;
-    size_t _chunkSize;
-    String _buffer;
+    void flushPrefix(size_t size) {
+        const char saved = _buffer[size];
+        _buffer[size] = '\0';
+        if (_handler) _handler(_buffer);
+        _buffer[size] = saved;
+        ++_chunks;
+        _size -= size;
+        memmove(_buffer, _buffer + size, _size);
+    }
+
+    static constexpr size_t ChunkSize = 192;
+    ChunkHandler _handler;
+    char _buffer[ChunkSize + 1] = {};
+    size_t _size = 0;
+    size_t _length = 0;
+    size_t _chunks = 0;
+    uint32_t _hash = 2166136261u;
 };
 
 void sendSerialConfigDescriptor(
     uint16_t requestId,
     const ArmorLinkModule& module
 ) {
-    constexpr size_t chunkSize = 192;
-    // Snapshot once: metadata and payload must describe the same document.
-    const String descriptor = ArmorLinkDescriptor::buildWebSerial(module);
-    if (descriptor.isEmpty()) {
+#if ARMORLINK_HAS_WEB_SERIAL
+    // Measure the complete WebSerial profile without allocating its JSON string.
+    ArmorLinkSerialDescriptorPrint measured;
+    if (!ArmorLinkDescriptor::writeWebSerial(module, measured)) {
         sendSerialFlasherError(requestId, "descriptor_build_failed",
-                               "Config descriptor could not be serialized");
+                               "WebSerial config descriptor could not be measured");
         return;
     }
+    measured.finish();
 
-    // Keep UTF-8 characters intact when each chunk is decoded independently.
-    auto chunkEnd = [&](size_t start) {
-        size_t end = min(start + chunkSize, descriptor.length());
-        while (end < descriptor.length() && end > start &&
-               (static_cast<uint8_t>(descriptor[end]) & 0xC0) == 0x80) {
-            --end;
-        }
-        return end;
-    };
-    size_t chunkCount = 0;
-    for (size_t start = 0; start < descriptor.length(); start = chunkEnd(start)) {
-        ++chunkCount;
-    }
-
-    auto sendFrame = [&](const char* type, size_t index, const String& data) {
+    auto sendFrame = [&](const char* type, size_t index, const char* data) {
         StaticJsonDocument<768> doc;
         doc["type"] = type;
         doc["requestId"] = requestId;
-        doc["chunkCount"] = chunkCount;
-        doc["totalLength"] = descriptor.length();
+        doc["chunkCount"] = measured.chunks();
+        doc["totalLength"] = measured.length();
+#if ARMORLINK_HAS_BLE
+        // USB-only metadata for the directly attached, provisioned gateway.
+        // Never add credentials to shared BLE/ESP-NOW descriptors.
+        if (strcmp(type, "config_meta") == 0 &&
+            &module == _module && _isGatewayMode && ArmorLinkSecurity::isPinSet()) {
+            doc["bluetoothPin"] = ArmorLinkSecurity::getPin();
+        }
+#endif
         if (strcmp(type, "config_chunk") == 0) {
             doc["chunkIndex"] = index;
             doc["data"] = data;
         }
         String frame;
         serializeJson(doc, frame);
+        doc.clear();
         emitSerialTransportJson(frame);
     };
 
     sendFrame("config_meta", 0, "");
     size_t index = 0;
-    for (size_t start = 0; start < descriptor.length();) {
-        const size_t end = chunkEnd(start);
-        sendFrame("config_chunk", index++, descriptor.substring(start, end));
-        start = end;
+    ArmorLinkSerialDescriptorPrint output([&](const char* data) {
+        sendFrame("config_chunk", index++, data);
+    });
+    const bool written = ArmorLinkDescriptor::writeWebSerial(module, output);
+    output.finish();
+    // Do not complete a transfer if asynchronous callbacks changed the data
+    // between passes, even if its byte count happened to remain unchanged.
+    if (!written || output.length() != measured.length() ||
+        output.chunks() != measured.chunks() || output.hash() != measured.hash()) {
+        sendSerialFlasherError(requestId, "descriptor_changed",
+                               "Config descriptor changed during transfer; please retry");
+        return;
     }
     sendFrame("config_end", 0, "");
+#endif
 }
 
 void sendSerialFlasherError(
@@ -4382,8 +4641,7 @@ void sendSerialFlasherError(
     String json;
     serializeJson(doc, json);
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
 }
 
   bool handleUnknownSerialLine(
@@ -4404,6 +4662,7 @@ void sendSerialFlasherError(
     const String& moduleVersion,
     const String& armorLinkVersion)
   {
+#if ARMORLINK_HAS_ESPNOW
     if (!_isGatewayMode || macText.isEmpty()) {
       return;
     }
@@ -4438,6 +4697,7 @@ void sendSerialFlasherError(
 
       return;
     }
+#endif
   }
 
 void handleSerialMenuCommand(String line) {
@@ -4512,6 +4772,7 @@ void printSerialMenuHelp() {
 }
 
 void printPairingCandidates() {
+#if ARMORLINK_HAS_ESPNOW
   Serial.println();
   Serial.println("=== Pairing Candidates ===");
 
@@ -4538,9 +4799,11 @@ void printPairingCandidates() {
 
     displayIndex++;
   }
-}
+#endif
+  }
 
   void printPairedModules() {
+#if ARMORLINK_HAS_ESPNOW
     if (!_isGatewayMode) {
       Serial.println("[MENU] Not in gateway mode.");
       return;
@@ -4568,6 +4831,7 @@ void printPairingCandidates() {
     }
 
     Serial.println("======================");
+#endif
   }
 
   bool sendActionBuilderCommandToTarget(
@@ -4592,10 +4856,12 @@ void printPairingCandidates() {
     return _transport.sendPacketToTarget(target, out) == ESP_OK;
   }
 
-  static constexpr size_t MAX_TELEMETRY_KEYS = 16;
+  static constexpr size_t MAX_TELEMETRY_KEYS = ARMORLINK_MAX_TELEMETRY_KEYS;
   TelemetryRateEntry _telemetryRates[MAX_TELEMETRY_KEYS]{};
-  static constexpr size_t MAX_DATA_STREAM_RATE_KEYS = 8;
+  static constexpr size_t MAX_DATA_STREAM_RATE_KEYS = ARMORLINK_MAX_DATA_STREAM_RATE_KEYS;
+#if ARMORLINK_HAS_DATASTREAMS
   DataStreamRateEntry _dataStreamRates[MAX_DATA_STREAM_RATE_KEYS]{};
+#endif
 
   bool _isGatewayMode = false;
 
@@ -4605,12 +4871,20 @@ void printPairingCandidates() {
   uint8_t _remoteLogLevel = AL_LOG_INFO;
 
   ArmorLinkPairingInfo _pairingInfo{};
+#if ARMORLINK_HAS_ESPNOW
   ArmorLinkStoredPairedModule _pairedModules[ArmorLinkStorage::MAX_PAIRED_MODULES]{};
+#endif
   size_t _pairedModuleCount = 0;
 
   ArmorLinkModuleTimeoutHook _moduleTimeoutHook = nullptr;
+#if ARMORLINK_HAS_ESPNOW
   ArmorLinkModulePresenceState _presenceStates[ArmorLinkStorage::MAX_PAIRED_MODULES]{};
+#endif
   uint32_t _lastPresenceCheckMs = 0;
+  volatile bool _presenceProbePending = false;
+  bool _presenceProbeActive = false;
+  size_t _presenceProbeIndex = 0;
+  uint32_t _lastPresenceProbeMs = 0;
   uint32_t _lastHeartbeatMs = 0;
 
   bool _loggingSyncPending = false;
@@ -4647,11 +4921,11 @@ void printPairingCandidates() {
   static constexpr uint32_t PAIR_RESPONSE_REPEAT_MIN_INTERVAL_MS = 2000;
   static constexpr uint8_t PAIR_ANNOUNCE_SEND_ATTEMPTS = 3;
   static constexpr uint8_t PAIR_RESPONSE_SEND_ATTEMPTS = 3;
-  static constexpr size_t MAX_PENDING_PAIRING_CANDIDATES = 16;
-  static constexpr size_t MAX_DATA_STREAM_SUBSCRIPTIONS = 24;
-  static constexpr size_t MAX_LOCAL_DATA_STREAM_SUBSCRIPTIONS = 12;
-  static constexpr size_t MAX_REQUESTED_DATA_STREAMS = 12;
-  static constexpr size_t MAX_DATA_STREAM_HANDLERS = 12;
+  static constexpr size_t MAX_PENDING_PAIRING_CANDIDATES = ARMORLINK_MAX_PAIRING_CANDIDATES;
+  static constexpr size_t MAX_DATA_STREAM_SUBSCRIPTIONS = ARMORLINK_MAX_DATA_STREAM_SUBSCRIPTIONS;
+  static constexpr size_t MAX_LOCAL_DATA_STREAM_SUBSCRIPTIONS = ARMORLINK_MAX_LOCAL_DATA_STREAM_SUBSCRIPTIONS;
+  static constexpr size_t MAX_REQUESTED_DATA_STREAMS = ARMORLINK_MAX_REQUESTED_DATA_STREAMS;
+  static constexpr size_t MAX_DATA_STREAM_HANDLERS = ARMORLINK_MAX_DATA_STREAM_HANDLERS;
 
   struct DataStreamSubscription {
     bool occupied = false;
@@ -4677,12 +4951,22 @@ void printPairingCandidates() {
     ArmorLinkDataStreamHandler handler;
   };
 
+#if ARMORLINK_HAS_ESPNOW
   ArmorLinkPairingCandidate _pendingCandidates[MAX_PENDING_PAIRING_CANDIDATES]{};
+#endif
   size_t _pendingCandidateCount = 0;
+#if ARMORLINK_HAS_DATASTREAMS
   DataStreamSubscription _dataStreamSubscriptions[MAX_DATA_STREAM_SUBSCRIPTIONS]{};
+#endif
+#if ARMORLINK_HAS_DATASTREAMS
   LocalDataStreamSubscription _localDataStreamSubscriptions[MAX_LOCAL_DATA_STREAM_SUBSCRIPTIONS]{};
+#endif
+#if ARMORLINK_HAS_DATASTREAMS
   RequestedDataStream _requestedDataStreams[MAX_REQUESTED_DATA_STREAMS]{};
+#endif
+#if ARMORLINK_HAS_DATASTREAMS
   DataStreamHandlerEntry _dataStreamHandlers[MAX_DATA_STREAM_HANDLERS]{};
+#endif
 
   bool isPairingTraffic(const ArmorLinkPacket& msg) const {
     if (msg.msgType == AL_MSG_PAIR_ANNOUNCE ||
@@ -4720,7 +5004,7 @@ void printPairingCandidates() {
 
     if (_remotePairingQuietUntilMs != 0 &&
         (int32_t)(millis() - _remotePairingQuietUntilMs) >= 0) {
-      Serial.printf("[PAIR] Remote pairing quiet expired | sessionId=%u\n",
+      AL_INTERNAL_PRINTF("[PAIR] Remote pairing quiet expired | sessionId=%u\n",
                     _remotePairingQuietSessionId);
       _remotePairingQuiet = false;
       _remotePairingQuietSessionId = 0;
@@ -4732,7 +5016,9 @@ void printPairingCandidates() {
   }
 
   void remotePairingQuietTick() {
+#if ARMORLINK_HAS_ESPNOW
     isRemotePairingQuietActive();
+#endif
   }
 
   void enterRemotePairingQuiet(uint16_t sessionId, uint32_t durationMs = 45000) {
@@ -4749,7 +5035,7 @@ void printPairingCandidates() {
     _remotePairingQuietUntilMs = millis() + durationMs;
 
     if (changed) {
-      Serial.printf("[PAIR] Remote pairing quiet started | sessionId=%u | timeoutMs=%lu\n",
+      AL_INTERNAL_PRINTF("[PAIR] Remote pairing quiet started | sessionId=%u | timeoutMs=%lu\n",
                     sessionId,
                     (unsigned long)durationMs);
     }
@@ -4764,7 +5050,7 @@ void printPairingCandidates() {
       return;
     }
 
-    Serial.printf("[PAIR] Remote pairing quiet stopped | sessionId=%u\n",
+    AL_INTERNAL_PRINTF("[PAIR] Remote pairing quiet stopped | sessionId=%u\n",
                   _remotePairingQuietSessionId);
 
     _remotePairingQuiet = false;
@@ -4783,6 +5069,7 @@ void printPairingCandidates() {
   }
 
   void pairingQuietStopRepeatTick() {
+#if ARMORLINK_HAS_ESPNOW
     if (!_isGatewayMode || _pairingQuietStopRepeatSessionId == 0) {
       return;
     }
@@ -4802,6 +5089,7 @@ void printPairingCandidates() {
 
     _lastPairingQuietStopMs = now;
     broadcastPairingQuietState(false, _pairingQuietStopRepeatSessionId);
+#endif
   }
 
   bool allowTelemetrySend(const String& key) {
@@ -4827,6 +5115,7 @@ void printPairingCandidates() {
   }
 
   bool allowDataStreamSend(const char* key, uint32_t intervalMs) {
+#if ARMORLINK_HAS_DATASTREAMS
     if (intervalMs == 0) {
       return true;
     }
@@ -4840,7 +5129,9 @@ void printPairingCandidates() {
     for (size_t i = 0; i < MAX_DATA_STREAM_RATE_KEYS; ++i) {
       if (_dataStreamRates[i].key[0] == 0) {
         armorlinkCopyString(_dataStreamRates[i].key, sizeof(_dataStreamRates[i].key), key);
+#if ARMORLINK_HAS_DATASTREAMS
         _dataStreamRates[i].lastSentMs = now;
+#endif
         return true;
       }
 
@@ -4848,15 +5139,21 @@ void printPairingCandidates() {
         if ((uint32_t)(now - _dataStreamRates[i].lastSentMs) < intervalMs) {
           return false;
         }
+#if ARMORLINK_HAS_DATASTREAMS
         _dataStreamRates[i].lastSentMs = now;
+#endif
         return true;
       }
     }
 
     return true;
+#else
+    return false;
+#endif
   }
 
   bool upsertLocalDataStreamSubscription(const char* source, const char* stream) {
+#if ARMORLINK_HAS_DATASTREAMS
     for (size_t i = 0; i < MAX_LOCAL_DATA_STREAM_SUBSCRIPTIONS; ++i) {
       if (_localDataStreamSubscriptions[i].occupied &&
           String(_localDataStreamSubscriptions[i].source).equalsIgnoreCase(source) &&
@@ -4878,11 +5175,15 @@ void printPairingCandidates() {
       }
     }
 
-    Serial.printf("[STREAM] Local subscription table full for %s.%s\n", source, stream);
+    AL_INTERNAL_PRINTF("[STREAM] Local subscription table full for %s.%s\n", source, stream);
     return false;
+#else
+    return false;
+#endif
   }
 
   void removeLocalDataStreamSubscription(const char* source, const char* stream) {
+#if ARMORLINK_HAS_DATASTREAMS
     for (size_t i = 0; i < MAX_LOCAL_DATA_STREAM_SUBSCRIPTIONS; ++i) {
       if (_localDataStreamSubscriptions[i].occupied &&
           String(_localDataStreamSubscriptions[i].source).equalsIgnoreCase(source) &&
@@ -4890,9 +5191,11 @@ void printPairingCandidates() {
         _localDataStreamSubscriptions[i] = LocalDataStreamSubscription{};
       }
     }
+#endif
   }
 
   bool upsertRequestedDataStream(const char* stream) {
+#if ARMORLINK_HAS_DATASTREAMS
     if (stream == nullptr || stream[0] == '\0') {
       return false;
     }
@@ -4910,16 +5213,20 @@ void printPairingCandidates() {
         armorlinkCopyString(_requestedDataStreams[i].stream,
                             sizeof(_requestedDataStreams[i].stream),
                             stream);
-        Serial.printf("[STREAM] Source stream requested: %s\n", stream);
+        AL_INTERNAL_PRINTF("[STREAM] Source stream requested: %s\n", stream);
         return true;
       }
     }
 
-    Serial.printf("[STREAM] Requested stream table full for %s\n", stream);
+    AL_INTERNAL_PRINTF("[STREAM] Requested stream table full for %s\n", stream);
     return false;
+#else
+    return false;
+#endif
   }
 
   void removeRequestedDataStream(const char* stream) {
+#if ARMORLINK_HAS_DATASTREAMS
     if (stream == nullptr || stream[0] == '\0') {
       return;
     }
@@ -4928,12 +5235,14 @@ void printPairingCandidates() {
       if (_requestedDataStreams[i].occupied &&
           equalsIgnoreCase(_requestedDataStreams[i].stream, stream)) {
         _requestedDataStreams[i] = RequestedDataStream{};
-        Serial.printf("[STREAM] Source stream released: %s\n", stream);
+        AL_INTERNAL_PRINTF("[STREAM] Source stream released: %s\n", stream);
       }
     }
+#endif
   }
 
   bool isDataStreamRequested(const char* stream) const {
+#if ARMORLINK_HAS_DATASTREAMS
     if (stream == nullptr || stream[0] == '\0') {
       return false;
     }
@@ -4946,9 +5255,13 @@ void printPairingCandidates() {
     }
 
     return false;
+#else
+    return false;
+#endif
   }
 
   esp_err_t sendDataStreamSubscription(const char* source, const char* stream, bool subscribe) {
+#if ARMORLINK_HAS_DATASTREAMS
     if (_options.defaultLogTarget.isEmpty()) {
       return ESP_ERR_NOT_FOUND;
     }
@@ -4975,16 +5288,20 @@ void printPairingCandidates() {
     setArmorLinkPacketPayload(out, payload);
 
     esp_err_t result = _transport.sendPacketToTarget(_options.defaultLogTarget, out);
-    Serial.printf("[STREAM] %s %s.%s -> %s (%s)\n",
+    AL_INTERNAL_PRINTF("[STREAM] %s %s.%s -> %s (%s)\n",
                   subscribe ? "Subscribe" : "Unsubscribe",
                   source ? source : "*",
                   stream ? stream : "",
                   _options.defaultLogTarget.c_str(),
                   esp_err_to_name(result));
     return result;
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
   }
 
   void sendAllDataStreamSubscriptions() {
+#if ARMORLINK_HAS_DATASTREAMS
     if (_isGatewayMode || _options.defaultLogTarget.isEmpty()) {
       return;
     }
@@ -5000,11 +5317,13 @@ void printPairingCandidates() {
       delay(15);
       yield();
     }
+#endif
   }
 
   bool upsertGatewayDataStreamSubscription(const char* subscriber,
                                            const char* source,
                                            const char* stream) {
+#if ARMORLINK_HAS_DATASTREAMS
     if (subscriber == nullptr || strlen(subscriber) == 0 ||
         stream == nullptr || strlen(stream) == 0) {
       return false;
@@ -5034,7 +5353,7 @@ void printPairingCandidates() {
         armorlinkCopyString(_dataStreamSubscriptions[i].stream,
                             sizeof(_dataStreamSubscriptions[i].stream),
                             stream);
-        Serial.printf("[STREAM][GW] %s subscribed to %s.%s\n",
+        AL_INTERNAL_PRINTF("[STREAM][GW] %s subscribed to %s.%s\n",
                       subscriber,
                       normalizedSource,
                       stream);
@@ -5042,16 +5361,20 @@ void printPairingCandidates() {
       }
     }
 
-    Serial.printf("[STREAM][GW] Subscription table full for %s -> %s.%s\n",
+    AL_INTERNAL_PRINTF("[STREAM][GW] Subscription table full for %s -> %s.%s\n",
                   subscriber,
                   normalizedSource,
                   stream);
     return false;
+#else
+    return false;
+#endif
   }
 
   void removeGatewayDataStreamSubscription(const char* subscriber,
                                            const char* source,
                                            const char* stream) {
+#if ARMORLINK_HAS_DATASTREAMS
     const char* normalizedSource =
       (source == nullptr || strlen(source) == 0) ? "*" : source;
 
@@ -5060,13 +5383,14 @@ void printPairingCandidates() {
           equalsIgnoreCase(_dataStreamSubscriptions[i].subscriber, subscriber) &&
           equalsIgnoreCase(_dataStreamSubscriptions[i].source, normalizedSource) &&
           equalsIgnoreCase(_dataStreamSubscriptions[i].stream, stream)) {
-        Serial.printf("[STREAM][GW] %s unsubscribed from %s.%s\n",
+        AL_INTERNAL_PRINTF("[STREAM][GW] %s unsubscribed from %s.%s\n",
                       subscriber,
                       normalizedSource,
                       stream);
         _dataStreamSubscriptions[i] = DataStreamSubscription{};
       }
     }
+#endif
   }
 
   bool dataStreamSubscriptionMatches(const DataStreamSubscription& sub,
@@ -5084,6 +5408,7 @@ void printPairingCandidates() {
   }
 
   size_t gatewayDataStreamDemandCount(const char* source, const char* stream) const {
+#if ARMORLINK_HAS_DATASTREAMS
     if (source == nullptr || stream == nullptr || stream[0] == '\0') {
       return 0;
     }
@@ -5097,6 +5422,9 @@ void printPairingCandidates() {
       }
     }
     return count;
+#else
+    return 0;
+#endif
   }
 
   bool isLocalDataStreamSource(const char* source) const {
@@ -5110,6 +5438,8 @@ void printPairingCandidates() {
   esp_err_t forwardDataStreamDemandToSource(const char* source,
                                             const char* stream,
                                             bool subscribe) {
+#if ARMORLINK_HAS_DATASTREAMS
+#if ARMORLINK_HAS_ESPNOW
     if (!_isGatewayMode || source == nullptr || stream == nullptr ||
         source[0] == '\0' || stream[0] == '\0' ||
         isLocalDataStreamSource(source)) {
@@ -5149,15 +5479,22 @@ void printPairingCandidates() {
       result = _transport.sendPacketToTarget(String(source), out);
     }
 
-    Serial.printf("[STREAM][GW] %s source %s.%s -> %s\n",
+    AL_INTERNAL_PRINTF("[STREAM][GW] %s source %s.%s -> %s\n",
                   subscribe ? "request" : "release",
                   source,
                   stream,
                   esp_err_to_name(result));
     return result;
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
   }
 
   bool hasGatewayDataStreamRoute(const char* source, const char* stream) const {
+#if ARMORLINK_HAS_DATASTREAMS
     if (!_isGatewayMode || stream == nullptr || stream[0] == '\0') {
       return false;
     }
@@ -5184,9 +5521,13 @@ void printPairingCandidates() {
     }
 
     return false;
+#else
+    return false;
+#endif
   }
 
   void invokeLocalDataStreamHandlers(const ArmorLinkPacket& msg) {
+#if ARMORLINK_HAS_DATASTREAMS
     const String payload = armorLinkPacketPayloadToString(msg);
     ArmorLinkDataStream stream(msg.source, msg.command, msg.target, payload);
 
@@ -5199,9 +5540,12 @@ void printPairingCandidates() {
 
       _dataStreamHandlers[i].handler(stream);
     }
+#endif
   }
 
   void emitDataStreamBleEvent(const ArmorLinkPacket& msg, const char* routedTo = nullptr) {
+#if ARMORLINK_HAS_DATASTREAMS
+
     StaticJsonDocument<384> doc;
     doc["type"] = "data_stream";
     doc["source"] = msg.source;
@@ -5223,13 +5567,17 @@ void printPairingCandidates() {
     doc.clear();
     values.clear();
     bleNotifyEventJson(out);
+
+#endif
   }
 
   void handleDataStreamSubscribePacket(const ArmorLinkPacket& msg, bool subscribe) {
+#if ARMORLINK_HAS_DATASTREAMS
+
     StaticJsonDocument<160> doc;
     const String payload = armorLinkPacketPayloadToString(msg);
     if (deserializeJson(doc, payload) != DeserializationError::Ok) {
-      Serial.printf("[STREAM] Invalid subscription payload from %s\n", msg.source);
+      AL_INTERNAL_PRINTF("[STREAM] Invalid subscription payload from %s\n", msg.source);
       return;
     }
 
@@ -5274,9 +5622,12 @@ void printPairingCandidates() {
         forwardDataStreamDemandToSource(source.c_str(), stream.c_str(), false);
       }
     }
+
+#endif
   }
 
   esp_err_t routeDataStreamFromGateway(const ArmorLinkPacket& msg) {
+#if ARMORLINK_HAS_DATASTREAMS
     if (!_isGatewayMode) {
       return ESP_ERR_INVALID_STATE;
     }
@@ -5319,7 +5670,7 @@ void printPairingCandidates() {
     const uint32_t now = millis();
     if (lastRouteLogMs == 0 || (uint32_t)(now - lastRouteLogMs) >= 1000) {
       lastRouteLogMs = now;
-      Serial.printf("[STREAM][GW] Routed %s.%s to %u subscriber(s) | result=%s\n",
+      AL_INTERNAL_PRINTF("[STREAM][GW] Routed %s.%s to %u subscriber(s) | result=%s\n",
                     msg.source,
                     msg.command,
                     static_cast<unsigned>(forwarded),
@@ -5327,9 +5678,13 @@ void printPairingCandidates() {
     }
 
     return forwarded > 0 ? lastResult : ESP_OK;
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
   }
 
   void handleDataStreamPacket(const ArmorLinkPacket& msg) {
+#if ARMORLINK_HAS_DATASTREAMS
     if (_isGatewayMode) {
       routeDataStreamFromGateway(msg);
 
@@ -5352,8 +5707,10 @@ void printPairingCandidates() {
     if (targetMatches) {
       invokeLocalDataStreamHandlers(msg);
     }
+#endif
   }
 ArmorLinkPairingCandidate* pairingCandidateBySerialIndex(size_t serialIndex) {
+#if ARMORLINK_HAS_ESPNOW
   if (serialIndex == 0) {
     return nullptr;
   }
@@ -5373,7 +5730,10 @@ ArmorLinkPairingCandidate* pairingCandidateBySerialIndex(size_t serialIndex) {
   }
 
   return nullptr;
-}
+#else
+    return nullptr;
+#endif
+  }
 
 void pairCandidateBySerialIndex(int index) {
   if (index <= 0) {
@@ -5408,6 +5768,7 @@ void pairCandidateBySerialIndex(int index) {
 }
 
 void unpairModuleFromSerial(const String& value) {
+#if ARMORLINK_HAS_ESPNOW
   if (value.isEmpty()) {
     Serial.println("[MENU] Usage: unpair <number|mac>");
     return;
@@ -5445,7 +5806,8 @@ void unpairModuleFromSerial(const String& value) {
   }
 
   printPairedModules();
-}
+#endif
+  }
 
   bool shouldSendRemoteLog(uint8_t level) {
     // WARN und ERROR immer senden
@@ -5470,6 +5832,7 @@ void unpairModuleFromSerial(const String& value) {
     return true;
   }
   void syncPresenceStatesFromStoredModules() {
+#if ARMORLINK_HAS_ESPNOW
     memset(_presenceStates, 0, sizeof(_presenceStates));
 
     for (size_t i = 0; i < _pairedModuleCount && i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
@@ -5479,15 +5842,20 @@ void unpairModuleFromSerial(const String& value) {
       _presenceStates[i].lastSeenMs = 0;
       armorlinkCopyString(_presenceStates[i].mac, sizeof(_presenceStates[i].mac), _pairedModules[i].mac);
     }
+#endif
   }
 
   int findPresenceIndexByMac(const String& macText) const {
+#if ARMORLINK_HAS_ESPNOW
     for (size_t i = 0; i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
       if (_presenceStates[i].occupied && macText.equalsIgnoreCase(_presenceStates[i].mac)) {
         return static_cast<int>(i);
       }
     }
     return -1;
+#else
+    return -1;
+#endif
   }
 
 bool shouldReportPairingRequired(const ArmorLinkPacket& msg) const {
@@ -5551,7 +5919,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
   const uint8_t broadcastMac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
   esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);
 
-  Serial.printf("[PAIR] Pairing required reported to gateway | source=%s | result=%s | payloadLen=%u | payload=%s\n",
+  AL_INTERNAL_PRINTF("[PAIR] Pairing required reported to gateway | source=%s | result=%s | payloadLen=%u | payload=%s\n",
                 msg.source,
                 esp_err_to_name(result),
                 static_cast<unsigned>(eventJson.length()),
@@ -5586,13 +5954,13 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
     serializeJson(outDoc, out);
     outDoc.clear();
     inDoc.clear();
-    Serial.printf("[PAIR][GW] BLE pairing required compact event: %s\n", out.c_str());
+    AL_INTERNAL_PRINTF("[PAIR][GW] BLE pairing required compact event: %s\n", out.c_str());
     bleNotifyEventJson(out);
   }
 
   bool handleInternalEspNowCommand(const ArmorLinkPacket& msg) {
 
-    Serial.printf(
+    AL_INTERNAL_PRINTF(
       "[RX] type=%u entity='%s' command='%s' target='%s' source='%s'\n",
       msg.msgType,
       msg.entity,
@@ -5603,6 +5971,16 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
 
     if (msg.msgType != AL_MSG_COMMAND) {
       return false;
+    }
+
+    if (!_isGatewayMode && _pairingInfo.paired &&
+        equalsIgnoreCase(msg.entity, "system") &&
+        equalsIgnoreCase(msg.command, "presence_get")) {
+      // Only the paired gateway may request an immediate presence reply.
+      if (equalsIgnoreCase(msg.source, _pairingInfo.gatewayName)) {
+        sendHeartbeat();
+      }
+      return true;
     }
 
     if (!_isGatewayMode &&
@@ -5638,7 +6016,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
 
       const String payload = armorLinkPacketPayloadToString(msg);
 
-      Serial.printf("[PAIR][GW] Module pairing required event from %s\n", msg.source);
+      AL_INTERNAL_PRINTF("[PAIR][GW] Module pairing required event from %s\n", msg.source);
 
       emitCompactPairingRequiredEvent(payload, msg.source);
 
@@ -5673,7 +6051,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
         return true;
       }
 
-      Serial.printf("[HELLO][GW] Hello from %s (%s)\n",
+      AL_INTERNAL_PRINTF("[HELLO][GW] Hello from %s (%s)\n",
                     moduleName.c_str(),
                     moduleMac.c_str());
 
@@ -5700,7 +6078,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
     if (moduleMac.isEmpty()) {      
       return true;
     }    
-    Serial.printf(
+    AL_INTERNAL_PRINTF(
       "[HEARTBEAT][GW] Received from %s (%s)\n",
       moduleName.c_str(),
       moduleMac.c_str()
@@ -5737,7 +6115,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
     equalsIgnoreCase(msg.entity, "system") &&
     equalsIgnoreCase(msg.command, "hello_ack")) {
 
-  Serial.printf(
+  AL_INTERNAL_PRINTF(
     "[HELLO] hello_ack received target='%s' source='%s'\n",
     msg.target,
     msg.source
@@ -5762,7 +6140,7 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
         armorLinkPacketPayloadToString(msg));
     if (err != DeserializationError::Ok)
     {
-        Serial.print("[PAIR] JSON parse failed: ");
+        AL_INTERNAL_PRINT("[PAIR] JSON parse failed: ");
         AL_VERBOSE(err.c_str());
         return true;
     }
@@ -5831,7 +6209,8 @@ void sendPairingRequiredEvent(const ArmorLinkPacket& msg) {
   }
 
 void updateModulePresenceByMac(const String& macText, bool forceEmitOnlineEvent = false) {
-  Serial.printf(
+#if ARMORLINK_HAS_ESPNOW
+  AL_INTERNAL_PRINTF(
   "[PRESENCE] updateModulePresenceByMac(%s)\n",
   macText.c_str()
 );
@@ -5851,7 +6230,7 @@ void updateModulePresenceByMac(const String& macText, bool forceEmitOnlineEvent 
   state.isOnline = true;
   state.lastSeenMs = millis();
   state.timeoutReported = false;
-    Serial.printf(
+    AL_INTERNAL_PRINTF(
       "[PRESENCE] %s marked ONLINE at %lu\n",
       macText.c_str(),
       (unsigned long)state.lastSeenMs
@@ -5865,9 +6244,11 @@ void updateModulePresenceByMac(const String& macText, bool forceEmitOnlineEvent 
       emitModulePresenceEvent(_pairedModules[index], true, 0);
     }
   }
-}
+#endif
+  }
 
 void startupStateSyncTick() {
+#if ARMORLINK_HAS_ESPNOW
   if (_isGatewayMode || _module == nullptr) return;
   if (!_startupStateSyncActive || _startupStateSyncCompleted) return;
 
@@ -5889,7 +6270,8 @@ void startupStateSyncTick() {
     _lastStartupStateSyncMs = now;
     _startupStateSyncAttempt++;    
   }
-}
+#endif
+  }
 
 bool sendStateSyncRequest() {
   if (_module == nullptr) return false;
@@ -5910,10 +6292,11 @@ bool sendStateSyncRequest() {
   {
     StaticJsonDocument<320> doc;
     doc["mn"] = _module->name();
-    doc["moduleType"] = moduleTypeToString(_module->type());
     doc["mm"] = localMacString();
-    doc["moduleVersion"] = _module->version();
-    doc["armorLinkVersion"] = ARMORLINK_VERSION;
+    // The gateway already accepts these compact keys. Keep the request
+    // within one ESP-NOW payload; the long keys truncated LeftHand's JSON.
+    doc["mv"] = _module->version();
+    doc["av"] = ARMORLINK_VERSION;
     doc["wantLogs"] = true;
     doc["wantTelemetry"] = true;
     serializeJson(doc, payload);
@@ -5935,6 +6318,7 @@ bool sendStateSyncRequest() {
 }
 
 void heartbeatTick() {
+#if ARMORLINK_HAS_ESPNOW
   if (_isGatewayMode || _module == nullptr) {
     return;
   }
@@ -5960,7 +6344,8 @@ void heartbeatTick() {
   if (sendHeartbeat()) {
     _lastHeartbeatMs = now;
   }
-}
+#endif
+  }
 
 bool sendHeartbeat() {
   if (_module == nullptr) {
@@ -6001,7 +6386,7 @@ bool sendHeartbeat() {
 
   setArmorLinkPacketPayload(out, payload);
   esp_err_t result = _transport.sendPacketToMac(gatewayMacBytes, out);  
-  Serial.printf(
+  AL_INTERNAL_PRINTF(
     "[HEARTBEAT] Sent -> gateway=%s (%s) payloadLen=%u result=%s\n",
     _pairingInfo.gatewayName,
     _pairingInfo.gatewayMac,
@@ -6010,7 +6395,37 @@ bool sendHeartbeat() {
   );
   return result == ESP_OK;
 }
-  void presenceTick() {    
+  void presenceProbeTick() {
+#if ARMORLINK_HAS_ESPNOW
+    if (!_isGatewayMode || !_options.enableEspNow || _module == nullptr) return;
+    if (_presenceProbePending) {
+      _presenceProbePending = false;
+      _presenceProbeActive = true;
+      _presenceProbeIndex = 0;
+      _lastPresenceProbeMs = millis() - 100UL;
+      AL_INTERNAL_PRINTF("[PRESENCE] Probing %u paired nodes\n", (unsigned)_pairedModuleCount);
+    }
+    if (!_presenceProbeActive) return;
+    if (_presenceProbeIndex >= _pairedModuleCount) {
+      _presenceProbeActive = false;
+      return;
+    }
+    const uint32_t now = millis();
+    if ((uint32_t)(now - _lastPresenceProbeMs) < 100UL) return;
+    _lastPresenceProbeMs = now;
+    const auto& node = _pairedModules[_presenceProbeIndex++];
+    uint8_t mac[6];
+    if (!armorLinkParseMacString(String(node.mac), mac)) return;
+    const ArmorLinkPacket query = makeArmorLinkBasePacket(
+        AL_MSG_COMMAND, _module->name().c_str(), node.name, "system", "presence_get");
+    const esp_err_t result = _transport.sendPacketToMac(mac, query);
+    AL_INTERNAL_PRINTF("[PRESENCE] Probe -> %s result=%s\n", node.name, esp_err_to_name(result));
+#endif
+  }
+
+  void presenceTick() {
+#if ARMORLINK_HAS_ESPNOW
+
     if (!_isGatewayMode) {
       return;
     }
@@ -6036,7 +6451,7 @@ bool sendHeartbeat() {
       broadcastPairingQuietState(false, _pairingQuietStopRepeatSessionId);
     }
 
-    Serial.printf(
+    AL_INTERNAL_PRINTF(
       "[PRESENCE] Check running. paired=%u\n",
       (unsigned)_pairedModuleCount
     );
@@ -6050,7 +6465,7 @@ bool sendHeartbeat() {
       if (silentMs < timeoutMs) {
         continue;
       }
-      Serial.printf(
+      AL_INTERNAL_PRINTF(
         "[PRESENCE] TIMEOUT %s silent=%lu ms timeout=%lu ms\n",
         _pairedModules[i].name,
         (unsigned long)silentMs,
@@ -6068,6 +6483,7 @@ bool sendHeartbeat() {
         emitModulePresenceEvent(_pairedModules[i], false, silentMs);
       }
     }
+#endif
   }
 void initStartupHelloState() {
   _startupHelloActive = false;
@@ -6121,6 +6537,7 @@ uint32_t nextStartupHelloIntervalMs() const {
 }
 
 void startupHelloTick() {
+#if ARMORLINK_HAS_ESPNOW
   if (_isGatewayMode) {
     return;
   }
@@ -6155,9 +6572,10 @@ void startupHelloTick() {
     _lastStartupHelloMs = now;
     _startupHelloAttempt++;
 
-    Serial.printf("[HELLO] Sent startup hello attempt %u\n", _startupHelloAttempt);
+    AL_INTERNAL_PRINTF("[HELLO] Sent startup hello attempt %u\n", _startupHelloAttempt);
   }
-}
+#endif
+  }
 
 bool sendStartupHello() {
   if (_module == nullptr) {
@@ -6199,7 +6617,7 @@ bool sendStartupHello() {
 
   esp_err_t result = _transport.sendPacketToMac(gatewayMacBytes, out);
 
-  Serial.print("[HELLO] sendStartupHello result: ");
+  AL_INTERNAL_PRINT("[HELLO] sendStartupHello result: ");
   AL_VERBOSE(esp_err_to_name(result));
 
   return result == ESP_OK;
@@ -6233,19 +6651,20 @@ void sendHelloAckToModule(const char* moduleName, const char* moduleMac) {
   setArmorLinkPacketPayload(out, payload);
   esp_err_t result = _transport.sendPacketToMac(macBytes, out);
 
-  Serial.printf("[HELLO][GW] hello_ack -> %s (%s): %s\n",
+  AL_INTERNAL_PRINTF("[HELLO][GW] hello_ack -> %s (%s): %s\n",
                 moduleName,
                 moduleMac,
                 esp_err_to_name(result));
 }
 void emitModulePresenceSnapshot() {
+#if ARMORLINK_HAS_ESPNOW
   if (!_isGatewayMode) {
     return;
   }
   if (_pairingQuietStopRepeatSessionId != 0) {
     broadcastPairingQuietState(false, _pairingQuietStopRepeatSessionId);
   }
-  Serial.printf("[PRESENCE] Snapshot start. pairedModuleCount=%u\n",
+  AL_INTERNAL_PRINTF("[PRESENCE] Snapshot start. pairedModuleCount=%u\n",
                   (unsigned)_pairedModuleCount);
   emitModulePresenceSnapshotEvent();
 
@@ -6254,7 +6673,7 @@ void emitModulePresenceSnapshot() {
 
   for (size_t i = 0; i < _pairedModuleCount && i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
     ArmorLinkModulePresenceState& state = _presenceStates[i];
-    Serial.printf("[PRESENCE] Emitting %s (%s)\n",
+    AL_INTERNAL_PRINTF("[PRESENCE] Emitting %s (%s)\n",
               _pairedModules[i].name,
               _pairedModules[i].mac);
     if (!state.occupied) {
@@ -6278,9 +6697,11 @@ void emitModulePresenceSnapshot() {
 
     emitModulePresenceEvent(_pairedModules[i], online, silentMs);
   }
-}
+#endif
+  }
 
   void emitModulePresenceSnapshotEvent() {
+#if ARMORLINK_HAS_ESPNOW
     if (!_isGatewayMode) {
       return;
     }
@@ -6313,11 +6734,12 @@ void emitModulePresenceSnapshot() {
     serializeJson(doc, out);
     doc.clear();
     AL_VERBOSE("[PRESENCE] BLE SNAPSHOT EVENT: %s\n", out.c_str());
-    Serial.printf("[BLE][TX] module_presence_snapshot bytes=%u modules=%u\n",
+    AL_INTERNAL_PRINTF("[BLE][TX] module_presence_snapshot bytes=%u modules=%u\n",
                   static_cast<unsigned>(out.length()),
                   static_cast<unsigned>(_pairedModuleCount));
     bleNotifyEventJson(out);
     emitSerialEventJson(out);
+#endif
   }
 
   void emitModulePresenceEvent(const ArmorLinkStoredPairedModule& module, bool isOnline, uint32_t silentMs) {
@@ -6349,6 +6771,7 @@ void emitModulePresenceSnapshot() {
   
 
   void pairingTick() {
+#if ARMORLINK_HAS_ESPNOW
     if (!_pairingActive) {
       return;
     }
@@ -6370,7 +6793,7 @@ void emitModulePresenceSnapshot() {
       if (!_pairingActive || timedOutSessionId == 0) {
         return;
       }
-      Serial.printf("[PAIR][GW] Pairing timeout | sessionId=%u\n", timedOutSessionId);
+      AL_INTERNAL_PRINTF("[PAIR][GW] Pairing timeout | sessionId=%u\n", timedOutSessionId);
       emitPairingStateEvent("pairing_timeout", timedOutSessionId);
       stopPairing();
       return;
@@ -6378,13 +6801,14 @@ void emitModulePresenceSnapshot() {
 
     if ((uint32_t)(now - _lastPairAnnounceMs) >= PAIR_ANNOUNCE_INTERVAL_MS) {
       const bool announced = sendPairAnnounceBurst();
-      Serial.printf("[PAIR][GW] Announcing pairing session %u | result=%s\n",
+      AL_INTERNAL_PRINTF("[PAIR][GW] Announcing pairing session %u | result=%s\n",
                     _pairingSessionId,
                     announced ? "sent" : "failed");
       _lastPairAnnounceMs = now;
       emitPairingStateEvent("pairing_ping");
       emitPendingPairingCandidateEvents();
     }
+#endif
   }
 
   void sendSimpleLog(ArmorLinkLogLevel level, const String& message) {
@@ -6420,7 +6844,7 @@ void emitModulePresenceSnapshot() {
       }
 #endif
 
-      if (_isGatewayMode && isBleLogStreamEnabled()) {
+      if ((_isGatewayMode || !ARMORLINK_HAS_ESPNOW) && isBleLogStreamEnabled()) {
       const char* sourceName = (_module != nullptr) ? _module->name().c_str() : "ArmorLink";
 
       StaticJsonDocument<384> doc;
@@ -6481,17 +6905,21 @@ static void handleBleConnectedStatic() {
   }
 }
   static void handleManagedReceiveStatic(const uint8_t* data, int len) {
+#if ARMORLINK_HAS_ESPNOW
     ArmorLinkRuntime* self = instance();
     if (self != nullptr) {
       self->onEspNowDataReceived(data, len);
     }
+#endif
   }
 
   static void handleManagedSendStatic(const uint8_t* mac_addr, esp_now_send_status_t status) {
+#if ARMORLINK_HAS_ESPNOW
     ArmorLinkRuntime* self = instance();
     if (self != nullptr) {
       self->onEspNowSendStatus(mac_addr, status);
     }
+#endif
   }
 
   static ArmorLinkRuntime*& instance() {
@@ -6564,7 +6992,7 @@ static void handleBleConnectedStatic() {
     StaticJsonDocument<160> doc;
     auto err = deserializeJson(doc, announcePayload);
     if (err != DeserializationError::Ok) {
-      Serial.print("[PAIR] Announce JSON parse failed: ");
+      AL_INTERNAL_PRINT("[PAIR] Announce JSON parse failed: ");
       AL_VERBOSE(err.c_str());
       return;
     }
@@ -6575,7 +7003,7 @@ static void handleBleConnectedStatic() {
     const String gatewayName = String((const char*)(doc["gn"] | doc["gatewayName"] | ""));
     const String gatewayMac  = String((const char*)(doc["gm"] | doc["gatewayMac"] | ""));
     const uint32_t recoveryPin = doc["rp"] | doc["recoveryPin"] | 0;
-    Serial.printf("[PAIR] announce gatewayName=%s gatewayMac=%s sessionId=%u\n",
+    AL_INTERNAL_PRINTF("[PAIR] announce gatewayName=%s gatewayMac=%s sessionId=%u\n",
               gatewayName.c_str(),
               gatewayMac.c_str(),
               sessionId);
@@ -6649,7 +7077,7 @@ static void handleBleConnectedStatic() {
       }
     }
 
-    Serial.printf("[PAIR] Response results | attempts=%u | unicast=%s | broadcast=%s | gateway=%s (%s) | sessionId=%u | payloadLen=%u\n",
+    AL_INTERNAL_PRINTF("[PAIR] Response results | attempts=%u | unicast=%s | broadcast=%s | gateway=%s (%s) | sessionId=%u | payloadLen=%u\n",
                   PAIR_RESPONSE_SEND_ATTEMPTS,
                   esp_err_to_name(unicastResult),
                   esp_err_to_name(broadcastResult),
@@ -6665,44 +7093,45 @@ static void handleBleConnectedStatic() {
   }
 
   void handlePairResponsePacket(const ArmorLinkPacket& msg) {
-    AL_VERBOSELN("[PAIR][GW] handlePairResponsePacket entered");
+#if ARMORLINK_HAS_ESPNOW
+    AL_INTERNAL_PRINTLN("[PAIR][GW] handlePairResponsePacket entered");
 
     if (!_isGatewayMode) {
-      AL_VERBOSELN("[PAIR][GW] Ignored: gateway mode is false");
+      AL_INTERNAL_PRINTLN("[PAIR][GW] Ignored: gateway mode is false");
       return;
     }
 
     if (!_pairingActive) {
-      AL_VERBOSELN("[PAIR][GW] Ignored: pairing is not active");
+      AL_INTERNAL_PRINTLN("[PAIR][GW] Ignored: pairing is not active");
       return;
     }
 
     if ((int32_t)(millis() - _pairingEndsAtMs) >= 0) {
-      AL_VERBOSELN("[PAIR][GW] Ignored: pairing timeout reached");
+      AL_INTERNAL_PRINTLN("[PAIR][GW] Ignored: pairing timeout reached");
       stopPairing();
       return;
     }
 
     StaticJsonDocument<512> doc;
     if (deserializeJson(doc, armorLinkPacketPayloadToString(msg)) != DeserializationError::Ok) {
-      Serial.printf("[PAIR][GW] JSON parse failed | payloadLen=%u | payload=%s\n",
+      AL_INTERNAL_PRINTF("[PAIR][GW] JSON parse failed | payloadLen=%u | payload=%s\n",
                     msg.payloadLen,
                     armorLinkPacketPayloadToString(msg).c_str());
       return;
     }
 
-    AL_VERBOSELN("[PAIR][GW] JSON parse ok");
+    AL_INTERNAL_PRINTLN("[PAIR][GW] JSON parse ok");
 
     const String responseGatewayMac = String((const char*)(doc["gatewayMac"] | ""));
     const String localGatewayMac = localMacString();
 
     if (responseGatewayMac.isEmpty()) {
-      AL_VERBOSELN("[PAIR][GW] ignored: response missing gatewayMac");
+      AL_INTERNAL_PRINTLN("[PAIR][GW] ignored: response missing gatewayMac");
       return;
     }
 
     if (!responseGatewayMac.equalsIgnoreCase(localGatewayMac)) {
-      Serial.printf("[PAIR][GW] ignored: response for another gateway | responseGatewayMac=%s local=%s\n",
+      AL_INTERNAL_PRINTF("[PAIR][GW] ignored: response for another gateway | responseGatewayMac=%s local=%s\n",
                     responseGatewayMac.c_str(),
                     localGatewayMac.c_str());
       return;
@@ -6710,12 +7139,12 @@ static void handleBleConnectedStatic() {
 
     const uint16_t sessionId = doc["sessionId"] | 0;
 
-    Serial.printf("[PAIR][GW] sessionId=%u expected=%u\n",
+    AL_INTERNAL_PRINTF("[PAIR][GW] sessionId=%u expected=%u\n",
                   sessionId,
                   _pairingSessionId);
 
     if (sessionId != _pairingSessionId) {
-      AL_VERBOSELN("[PAIR][GW] Ignored: session mismatch");
+      AL_INTERNAL_PRINTLN("[PAIR][GW] Ignored: session mismatch");
       return;
     }
 
@@ -6725,12 +7154,13 @@ static void handleBleConnectedStatic() {
     const String moduleVersion = String((const char*)(doc["moduleVersion"] | "1.0"));
     const String armorLinkVersion = String((const char*)(doc["armorLinkVersion"] | ""));
 
-    Serial.printf("[PAIR][GW] moduleName=%s moduleType=%s moduleMac=%s\n",
+    AL_INTERNAL_PRINTF("[PAIR][GW] moduleName=%s moduleType=%s moduleMac=%s\n",
                   moduleName.c_str(),
                   moduleType.c_str(),
                   moduleMac.c_str());
 
     if (moduleName.isEmpty() || moduleMac.isEmpty()) {
+      AL_INTERNAL_PRINTLN("[PAIR][GW] Ignored: missing module name or MAC");
       return;
     }
 
@@ -6738,6 +7168,7 @@ static void handleBleConnectedStatic() {
     if (index < 0) {
       index = findFreePendingCandidateIndex();
       if (index < 0) {
+        AL_INTERNAL_PRINTLN("[PAIR][GW] Ignored: candidate table full");
         return;
       }
     }
@@ -6752,8 +7183,9 @@ static void handleBleConnectedStatic() {
     armorlinkCopyString(_pendingCandidates[index].armorLinkVersion, sizeof(_pendingCandidates[index].armorLinkVersion), armorLinkVersion);
 
     rebuildPendingCandidateCount();
-    AL_VERBOSELN("[PAIR][GW] Emitting pairing_candidate BLE event");
+    AL_INTERNAL_PRINTLN("[PAIR][GW] Emitting pairing_candidate BLE event");
     emitPairingCandidateEvent(_pendingCandidates[index]);
+#endif
   }
 
   void handlePairAcceptPacket(const ArmorLinkPacket& msg) {
@@ -6774,7 +7206,7 @@ static void handleBleConnectedStatic() {
     const String gatewayMac  = String((const char*)(doc["gm"] | doc["gatewayMac"] | ""));
     const uint32_t recoveryPin = doc["rp"] | doc["recoveryPin"] | 0;
 
-    Serial.printf("[PAIR] gatewayName=%s gatewayMac=%s recoveryPin=%lu\n",
+    AL_INTERNAL_PRINTF("[PAIR] gatewayName=%s gatewayMac=%s recoveryPin=%lu\n",
                   gatewayName.c_str(),
                   gatewayMac.c_str(),
                   (unsigned long)recoveryPin);
@@ -6818,6 +7250,7 @@ emitPairingLinkedEvent(gatewayName, gatewayMac);
   }
 
   String localMacString() const {
+#if ARMORLINK_HAS_ESPNOW
 #if defined(ESP32)
     uint8_t mac[6];
     esp_wifi_get_mac(WIFI_IF_STA, mac);
@@ -6827,32 +7260,46 @@ emitPairingLinkedEvent(gatewayName, gatewayMac);
 #else
     return "";
 #endif
+#else
+    return String();
+#endif
   }
 
   int findPendingCandidateIndexByMac(const String& macText) const {
+#if ARMORLINK_HAS_ESPNOW
     for (size_t i = 0; i < MAX_PENDING_PAIRING_CANDIDATES; ++i) {
       if (_pendingCandidates[i].occupied && macText.equalsIgnoreCase(_pendingCandidates[i].mac)) {
         return static_cast<int>(i);
       }
     }
     return -1;
+#else
+    return -1;
+#endif
   }
 
   int findFreePendingCandidateIndex() const {
+#if ARMORLINK_HAS_ESPNOW
     for (size_t i = 0; i < MAX_PENDING_PAIRING_CANDIDATES; ++i) {
       if (!_pendingCandidates[i].occupied) {
         return static_cast<int>(i);
       }
     }
     return -1;
+#else
+    return -1;
+#endif
   }
 
   void clearPendingPairingCandidates() {
+#if ARMORLINK_HAS_ESPNOW
     memset(_pendingCandidates, 0, sizeof(_pendingCandidates));
     _pendingCandidateCount = 0;
+#endif
   }
 
   void rebuildPendingCandidateCount() {
+#if ARMORLINK_HAS_ESPNOW
     size_t count = 0;
     for (size_t i = 0; i < MAX_PENDING_PAIRING_CANDIDATES; ++i) {
       if (_pendingCandidates[i].occupied) {
@@ -6860,6 +7307,7 @@ emitPairingLinkedEvent(gatewayName, gatewayMac);
       }
     }
     _pendingCandidateCount = count;
+#endif
   }
 
   void sendStateSyncToModule(const char* moduleName, const char* moduleMac) {
@@ -6915,6 +7363,7 @@ void syncLoggingStateToModule(const char* moduleName, const char* moduleMac) {
 }
 
 void loggingSyncTick() {
+#if ARMORLINK_HAS_ESPNOW
   if (!_loggingSyncPending || !_isGatewayMode || _module == nullptr) {
     return;
   }
@@ -6967,9 +7416,11 @@ void loggingSyncTick() {
 
   _loggingSyncPending = false;
   _loggingSyncStage = 0;
-}
+#endif
+  }
 
   bool unpairPairedModuleByMac(const String& macText) {
+#if ARMORLINK_HAS_ESPNOW
     if (!_isGatewayMode || macText.isEmpty()) {
       return false;
     }
@@ -6984,7 +7435,7 @@ void loggingSyncTick() {
     }
 
     if (index == ArmorLinkStorage::MAX_PAIRED_MODULES) {
-      Serial.printf("[PAIR][GW] Unpair failed, module not found: %s\n", macText.c_str());
+      AL_INTERNAL_PRINTF("[PAIR][GW] Unpair failed, module not found: %s\n", macText.c_str());
       return false;
     }
 
@@ -7004,12 +7455,12 @@ void loggingSyncTick() {
 
       esp_err_t sendResult = _transport.sendPacketToMac(moduleMacBytes, out);
 
-      Serial.printf("[PAIR][GW] Unpair command sent to %s (%s): %s\n",
+      AL_INTERNAL_PRINTF("[PAIR][GW] Unpair command sent to %s (%s): %s\n",
                     removed.name,
                     removed.mac,
                     esp_err_to_name(sendResult));
     } else {
-      Serial.printf("[PAIR][GW] Invalid MAC while unpairing: %s\n", removed.mac);
+      AL_INTERNAL_PRINTF("[PAIR][GW] Invalid MAC while unpairing: %s\n", removed.mac);
     }
 
     for (size_t i = index; i + 1 < _pairedModuleCount; ++i) {
@@ -7026,11 +7477,14 @@ void loggingSyncTick() {
 
     emitModuleUnpairedEvent(removed);
 
-    Serial.printf("[PAIR][GW] Module unpaired: %s (%s)\n",
+    AL_INTERNAL_PRINTF("[PAIR][GW] Module unpaired: %s (%s)\n",
                   removed.name,
                   removed.mac);
 
     return true;
+#else
+    return false;
+#endif
   }
 void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
   if (!_isGatewayMode) {
@@ -7051,6 +7505,7 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
   bleNotifyEventJson(out);
 }
   void upsertStoredPairedModule(const char* name, const char* type, const char* mac) {
+#if ARMORLINK_HAS_ESPNOW
     size_t index = ArmorLinkStorage::MAX_PAIRED_MODULES;
 
     for (size_t i = 0; i < _pairedModuleCount; ++i) {
@@ -7073,7 +7528,7 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
 
     _storage.savePairedModules(_pairedModules, _pairedModuleCount);
 
-    Serial.printf("[PAIR][GW] Stored paired modules count=%u\n",
+    AL_INTERNAL_PRINTF("[PAIR][GW] Stored paired modules count=%u\n",
                   static_cast<unsigned>(_pairedModuleCount));
     syncPresenceStatesFromStoredModules();
 
@@ -7083,13 +7538,14 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
 
       _peers.registerPeer(String(name), macBytes);
 
-      Serial.printf("[PAIR][GW] Registered paired peer: %s (%s)\n",
+      AL_INTERNAL_PRINTF("[PAIR][GW] Registered paired peer: %s (%s)\n",
 
                     name,
 
                     mac);
 
     }
+#endif
   }
 
   void emitPairingStateEvent(const char* type, uint16_t sessionIdOverride = 0) {
@@ -7100,7 +7556,7 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
     const uint16_t sessionId = sessionIdOverride != 0 ? sessionIdOverride : _pairingSessionId;
     if (equalsIgnoreCase(type, "pairing_timeout") &&
         (!_pairingActive || sessionId == 0)) {
-      Serial.printf("[PAIR][GW] Suppressed stale pairing_timeout | sessionId=%u | active=%s\n",
+      AL_INTERNAL_PRINTF("[PAIR][GW] Suppressed stale pairing_timeout | sessionId=%u | active=%s\n",
                     sessionId,
                     _pairingActive ? "true" : "false");
       return;
@@ -7137,12 +7593,13 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
     }
     String out;
     serializeJson(doc, out);
-    Serial.printf("[PAIR][GW] BLE pairing_candidate event: %s\n", out.c_str());
+    AL_INTERNAL_PRINTF("[PAIR][GW] BLE pairing_candidate event: %s\n", out.c_str());
     bleNotifyEventJson(out);
     emitSerialTransportJson(out);
   }
 
   void emitPendingPairingCandidateEvents() {
+#if ARMORLINK_HAS_ESPNOW
     if (!_isGatewayMode || !_pairingActive) {
       return;
     }
@@ -7157,6 +7614,7 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
       delay(20);
       yield();
     }
+#endif
   }
 
   void emitPairingCompletedEvent(const ArmorLinkPairingCandidate& candidate) {
@@ -7173,7 +7631,7 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
     module["type"] = candidate.type;
     module["mac"] = candidate.mac;
 
-    Serial.printf("[PAIR][GW] Pairing completed for %s | %s\n",
+    AL_INTERNAL_PRINTF("[PAIR][GW] Pairing completed for %s | %s\n",
                   candidate.name,
                   candidate.mac);
 
@@ -7225,26 +7683,27 @@ void emitModuleUnpairedEvent(const ArmorLinkStoredPairedModule& module) {
   }
 
   void emitSerialEventJson(const String& json) {
+#if ARMORLINK_HAS_WEB_SERIAL
     if (json.isEmpty() ||
         _localConfigTransferPending ||
         _localConfigTransferActive) {
       return;
     }
 
-    Serial.print("@ALF:");
-    Serial.println(json);
+    emitSerialTransportJson(json);
+#endif
   }
 
   void emitSerialTransportJson(const String& json) {
-    if (json.isEmpty()) {
-      return;
-    }
-
+#if ARMORLINK_HAS_WEB_SERIAL
+    if (json.isEmpty() || !isSerialWebClientActive()) return;
     Serial.print("@ALF:");
     Serial.println(json);
+#endif
   }
 
 int findPairedModuleIndexByName(const char* name) const {
+#if ARMORLINK_HAS_ESPNOW
   if (name == nullptr || strlen(name) == 0) return -1;
 
   for (size_t i = 0; i < _pairedModuleCount; ++i) {
@@ -7254,9 +7713,13 @@ int findPairedModuleIndexByName(const char* name) const {
   }
 
   return -1;
-}
+#else
+    return -1;
+#endif
+  }
 
 bool isPendingPairingCandidateName(const char* name) const {
+#if ARMORLINK_HAS_ESPNOW
   if (name == nullptr || strlen(name) == 0) return false;
 
   for (size_t i = 0; i < MAX_PENDING_PAIRING_CANDIDATES; ++i) {
@@ -7268,7 +7731,10 @@ bool isPendingPairingCandidateName(const char* name) const {
   }
 
   return false;
-}
+#else
+    return false;
+#endif
+  }
 
 bool isGatewayPacketAllowedFromUnknownSource(const ArmorLinkPacket& msg) const {
   if (!_isGatewayMode) return true;
@@ -7353,14 +7819,15 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
     result = _transport.sendPacketToMac(broadcastMac, out);
   }
 
-  Serial.printf("[PAIR][GW] Unknown module packet from %s -> unpair notice sent (%s)\n",
+  AL_INTERNAL_PRINTF("[PAIR][GW] Unknown module packet from %s -> unpair notice sent (%s)\n",
                 msg.source,
                 esp_err_to_name(result));
 }
 
   void processIncomingEspNowPacket(const ArmorLinkPacket& msg) {
+#if ARMORLINK_HAS_ESPNOW
     if (_isGatewayMode && _pairingActive && !isPairingTraffic(msg)) {
-      Serial.printf("[PAIR][GW] Quiet drop while pairing | source=%s type=%u entity=%s command=%s\n",
+      AL_INTERNAL_PRINTF("[PAIR][GW] Quiet drop while pairing | source=%s type=%u entity=%s command=%s\n",
                     msg.source,
                     msg.msgType,
                     msg.entity,
@@ -7371,7 +7838,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
     if (!_isGatewayMode &&
         isRemotePairingQuietActive() &&
         !isPairingTraffic(msg)) {
-      Serial.printf("[PAIR] Quiet ignore while gateway pairing | source=%s type=%u entity=%s command=%s\n",
+      AL_INTERNAL_PRINTF("[PAIR] Quiet ignore while gateway pairing | source=%s type=%u entity=%s command=%s\n",
                     msg.source,
                     msg.msgType,
                     msg.entity,
@@ -7380,7 +7847,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
     }
 
     if (_isGatewayMode && !isGatewayPacketAllowedFromUnknownSource(msg)) {
-      Serial.printf("[PAIR][GW] Dropping packet from unknown module source=%s type=%u entity=%s command=%s\n",
+      AL_INTERNAL_PRINTF("[PAIR][GW] Dropping packet from unknown module source=%s type=%u entity=%s command=%s\n",
                     msg.source,
                     msg.msgType,
                     msg.entity,
@@ -7416,7 +7883,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
       case AL_MSG_LOG: {
         String text = armorLinkPacketPayloadToString(msg);
 
-        Serial.printf("[%s] %s | %s.%s -> %s\n",
+        AL_INTERNAL_PRINTF("[%s] %s | %s.%s -> %s\n",
                       armorLinkLogLevelToString(msg.level),
                       msg.source,
                       msg.entity,
@@ -7500,7 +7967,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
         }
 
         String json = buildBleDescriptor();
-        Serial.printf("[CONFIG] BLE descriptor length=%u for requestId=%u\n",
+        AL_INTERNAL_PRINTF("[CONFIG] BLE descriptor length=%u for requestId=%u\n",
                       static_cast<unsigned>(json.length()),
                       msg.requestId);
 
@@ -7534,7 +8001,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
           );
         }
 
-        Serial.printf("[CONFIG] sent descriptor to %s requestId=%u -> %s\n",
+        AL_INTERNAL_PRINTF("[CONFIG] sent descriptor to %s requestId=%u -> %s\n",
                       msg.source,
                       msg.requestId,
                       esp_err_to_name(result));
@@ -7579,7 +8046,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
 
         esp_err_t sendResult = _transport.sendPacketToTarget(String(msg.source), response);
 
-        Serial.printf("[CONFIG] set %s.%s -> %s | ack=%s\n",
+        AL_INTERNAL_PRINTF("[CONFIG] set %s.%s -> %s | ack=%s\n",
                       msg.entity,
                       msg.command,
                       ArmorLinkDispatch::toString(configResult),
@@ -7610,7 +8077,7 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
       }
 
       case AL_MSG_PAIR_RESPONSE: {
-        Serial.printf("[PAIR][GW] Pair response received from %s | entity=%s | command=%s | payload=%s\n",
+        AL_INTERNAL_PRINTF("[PAIR][GW] Pair response received from %s | entity=%s | command=%s | payload=%s\n",
                       msg.source,
                       msg.entity,
                       msg.command,
@@ -7727,13 +8194,15 @@ void sendUnpairToUnknownModule(const ArmorLinkPacket& msg) {
           break;
         }
       }
-    }
+#endif
+  }
   
 };
 
 inline ArmorLinkRuntime ArmorLink;
 
 inline esp_err_t ArmorLinkDataStreamBuilder::send() {
+#if ARMORLINK_HAS_DATASTREAMS
   if (_rt == nullptr || _stream[0] == '\0') {
     return ESP_ERR_INVALID_STATE;
   }
@@ -7764,7 +8233,7 @@ inline esp_err_t ArmorLinkDataStreamBuilder::send() {
       const uint32_t now = millis();
       if (lastNoRouteLogMs == 0 || (uint32_t)(now - lastNoRouteLogMs) >= 2000) {
         lastNoRouteLogMs = now;
-        Serial.printf("[STREAM][GW] No route for local stream %s.%s\n",
+        AL_INTERNAL_PRINTF("[STREAM][GW] No route for local stream %s.%s\n",
                       sourceName,
                       _stream);
       }
@@ -7835,6 +8304,9 @@ inline esp_err_t ArmorLinkDataStreamBuilder::send() {
   }
 
   return _rt->_transport.sendPacketToTarget(_rt->_options.defaultLogTarget, out);
+#else
+  return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 inline esp_err_t ArmorLinkTelemetryBuilder::send() {
@@ -7873,7 +8345,7 @@ inline esp_err_t ArmorLinkTelemetryBuilder::send() {
   String payload;
   serializeJson(doc, payload);
 
-  if (_rt->_isGatewayMode) {
+  if (_rt->_isGatewayMode || !ARMORLINK_HAS_ESPNOW) {
     bleNotifyEventJson(payload);
     _rt->emitSerialEventJson(payload);
     return ESP_OK;
@@ -7905,6 +8377,7 @@ inline esp_err_t ArmorLinkTelemetryBuilder::send() {
 // ============================================================================
 // DEFAULT BLE HANDLER
 // ============================================================================
+#if ARMORLINK_HAS_BLE
 class ArmorLinkAutoBleCommandHandler : public ArmorLinkBleCommandHandler {
 public:
   explicit ArmorLinkAutoBleCommandHandler(const char* localTarget)
@@ -7944,7 +8417,7 @@ private:
     String out;
     serializeJson(doc, out);
     doc.clear();
-    Serial.printf("[BLE][TX] ack requestId=%u status=%s bytes=%u\n",
+    AL_INTERNAL_PRINTF("[BLE][TX] ack requestId=%u status=%s bytes=%u\n",
                   requestId,
                   status.c_str(),
                   static_cast<unsigned>(out.length()));
@@ -7975,5 +8448,5 @@ inline void ArmorLinkBleRuntime::begin(const char* deviceName, const char* local
   setDefaultTarget(localTarget);
   begin(deviceName, new ArmorLinkAutoBleCommandHandler(localTarget));
 }
-
+#endif // ARMORLINK_HAS_BLE
 #endif

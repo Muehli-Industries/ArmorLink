@@ -35,7 +35,7 @@ public:
       return json;
     }
 
-    Serial.println("[DESCRIPTOR] WebSerial descriptor failed, retrying BLE descriptor");
+    AL_INTERNAL_PRINTLN("[DESCRIPTOR] WebSerial descriptor failed, retrying BLE descriptor");
     return buildBle(module);
   }
 
@@ -61,7 +61,7 @@ public:
 
     const size_t writtenLength = countedOut.length();
     if (writtenLength != measuredLength) {
-      Serial.printf(
+      AL_INTERNAL_PRINTF(
           "[DESCRIPTOR] JSON stream incomplete (%u of %u bytes)\n",
           static_cast<unsigned>(writtenLength),
           static_cast<unsigned>(measuredLength));
@@ -142,7 +142,7 @@ public:
 
     const size_t measuredLength = measureJson(doc);
     if (measuredLength + 1 > bufferSize) {
-      Serial.printf(
+      AL_INTERNAL_PRINTF(
           "[DESCRIPTOR] BLE JSON buffer too small (%u of %u bytes)\n",
           static_cast<unsigned>(measuredLength),
           static_cast<unsigned>(bufferSize));
@@ -151,7 +151,7 @@ public:
 
     length = serializeJson(doc, buffer, bufferSize);
     if (length != measuredLength) {
-      Serial.printf(
+      AL_INTERNAL_PRINTF(
           "[DESCRIPTOR] BLE JSON buffer serialization incomplete (%u of %u bytes)\n",
           static_cast<unsigned>(length),
           static_cast<unsigned>(measuredLength));
@@ -199,11 +199,11 @@ private:
   static bool writeDocumentStreaming(const ArmorLinkModule& module,
                                      Print& out,
                                      Profile profile) {
-    const bool isWebSerial = profile == Profile::WebSerial;
+    const bool isWebSerial = ARMORLINK_HAS_WEB_SERIAL && profile == Profile::WebSerial;
     const bool hasBuilderSurface = hasActionBuilderSurface(module);
     const bool hasBuilderDescriptor =
         isWebSerial &&
-        (hasBuilderSurface || module.actions().items().size() > 0);
+        (ARMORLINK_HAS_ACTIONBUILDER && (hasBuilderSurface || module.actions().items().size() > 0));
 
     out.print('{');
     bool first = true;
@@ -212,6 +212,15 @@ private:
     writeStringProperty(out, first, "name", module.name());
     writeStringProperty(out, first, "moduleVersion", module.version());
     writeStringProperty(out, first, "armorLinkVersion", ARMORLINK_VERSION);
+    writePropertyName(out, first, "features");
+    out.print('{');
+    bool firstFeature = true;
+    writeBoolProperty(out, firstFeature, "espNow", ARMORLINK_HAS_ESPNOW);
+    writeBoolProperty(out, firstFeature, "ble", ARMORLINK_HAS_BLE);
+    writeBoolProperty(out, firstFeature, "actionBuilder", ARMORLINK_HAS_ACTIONBUILDER);
+    writeBoolProperty(out, firstFeature, "dataStreams", ARMORLINK_HAS_DATASTREAMS);
+    writeBoolProperty(out, firstFeature, "webSerial", ARMORLINK_HAS_WEB_SERIAL);
+    out.print('}');
     if (isWebSerial) {
       writeStringProperty(out, first, "chipId", buildChipId());
       writeStringProperty(out, first, "espChipModel", String(ESP.getChipModel()));
@@ -240,9 +249,11 @@ private:
     writeBoolProperty(out, first, "supportsPartialConfigGet", false);
     writeBoolProperty(out, first, "supportsConfigSet", true);
     if (isWebSerial) {
+      writeBoolProperty(out, first, "supportsStartupSequence", ARMORLINK_HAS_ACTIONBUILDER);
+      writeBoolProperty(out, first, "supportsLogMessages", ARMORLINK_HAS_ACTIONBUILDER);
       writeBoolProperty(out, first, "supportsActionBuilder",
-                        hasBuilderSurface ||
-                        module.actions().items().size() > 0);
+                        ARMORLINK_HAS_ACTIONBUILDER && (hasBuilderSurface ||
+                        module.actions().items().size() > 0));
     }
     writeStringProperty(out, first, "moduleType", moduleTypeToString(module.type()));
 
@@ -273,7 +284,7 @@ private:
   static void writeSectionsStreaming(const ArmorLinkModule& module,
                                      Print& out,
                                      Profile profile) {
-    const bool isWebSerial = profile == Profile::WebSerial;
+    const bool isWebSerial = ARMORLINK_HAS_WEB_SERIAL && profile == Profile::WebSerial;
     std::vector<String> orderedSections;
     bool hasArmorLinkSection = false;
 
@@ -313,6 +324,7 @@ private:
       }
     }
 
+#if ARMORLINK_HAS_ACTIONBUILDER
     for (const auto& action : module.actionBuilder().customActions()) {
       const String actionSection =
           action.section.isEmpty() ? String("Actions") : action.section;
@@ -329,6 +341,7 @@ private:
         orderedSections.push_back(actionSection);
       }
     }
+#endif
 
     if (isWebSerial && hasArmorLinkSection) {
       // System actions may already have registered this section. Move it to
@@ -359,7 +372,7 @@ private:
                                     Print& out,
                                     Profile profile,
                                     const String& sectionName) {
-    const bool isWebSerial = profile == Profile::WebSerial;
+    const bool isWebSerial = ARMORLINK_HAS_WEB_SERIAL && profile == Profile::WebSerial;
 
     out.print('{');
     bool first = true;
@@ -387,7 +400,7 @@ private:
                                    Print& out,
                                    Profile profile,
                                    const String& sectionName) {
-    const bool isWebSerial = profile == Profile::WebSerial;
+    const bool isWebSerial = ARMORLINK_HAS_WEB_SERIAL && profile == Profile::WebSerial;
     bool firstField = true;
 
     for (const auto& field : module.config().items()) {
@@ -411,7 +424,7 @@ private:
   static void writeFieldStreaming(const ArmorLinkConfigFieldDef& field,
                                   Print& out,
                                   Profile profile) {
-    const bool isWebSerial = profile == Profile::WebSerial;
+    const bool isWebSerial = ARMORLINK_HAS_WEB_SERIAL && profile == Profile::WebSerial;
 
     out.print('{');
     bool first = true;
@@ -566,6 +579,7 @@ private:
       out.print('}');
     }
 
+#if ARMORLINK_HAS_ACTIONBUILDER
     for (const auto& action : module.actionBuilder().customActions()) {
       const String actionSection =
           action.section.isEmpty() ? String("Actions") : action.section;
@@ -583,13 +597,15 @@ private:
       appendActionStreaming(action, out, profile, true);
       out.print('}');
     }
+#endif
+
   }
 
   static void appendActionStreaming(const ArmorLinkActionDef& action,
                                     Print& out,
                                     Profile profile,
                                     bool isCustomAction = false) {
-    const bool isWebSerial = profile == Profile::WebSerial;
+    const bool isWebSerial = ARMORLINK_HAS_WEB_SERIAL && profile == Profile::WebSerial;
     bool first = true;
 
     writeStringProperty(out, first, "id", action.id);
@@ -628,6 +644,7 @@ private:
     out.print('[');
     bool firstComponent = true;
 
+#if ARMORLINK_HAS_ACTIONBUILDER
     for (const auto& component : module.actionBuilder().components()) {
       if (!firstComponent) {
         out.print(',');
@@ -715,6 +732,7 @@ private:
       }
       out.print('}');
     }
+#endif
 
     out.print(']');
   }
@@ -724,6 +742,7 @@ private:
     out.print('[');
     bool firstDefinition = true;
 
+#if ARMORLINK_HAS_ACTIONBUILDER
     for (const auto& definition : module.actionBuilder().definitions()) {
       if (!firstDefinition) {
         out.print(',');
@@ -732,6 +751,7 @@ private:
 
       bool first = true;
       out.print('{');
+      writeBoolProperty(out, first, "startup", definition.startup);
       writeStringProperty(out, first, "entity", definition.entity);
       writeStringProperty(out, first, "command", definition.command);
       if (!definition.label.isEmpty()) {
@@ -773,6 +793,10 @@ private:
           writeStringProperty(out, firstOpProperty, "animation", op.option == 1 ? "pulse" : op.option == 2 ? "blink" : op.option == 3 ? "chase" : op.option == 4 ? "solid" : "rainbow");
           writeIntProperty(out, firstOpProperty, "durationMs", op.durationMs);
         }
+        if (op.code == ArmorLinkActionOpCode::LogMessage && op.logMessage) {
+          writeStringProperty(out, firstOpProperty, "level", op.logMessage->level == AL_LOG_DEBUG ? "debug" : op.logMessage->level == AL_LOG_WARN ? "warn" : op.logMessage->level == AL_LOG_ERROR ? "error" : "info");
+          writeStringProperty(out, firstOpProperty, "text", op.logMessage->text);
+        }
         if (op.code == ArmorLinkActionOpCode::StateSet) {
           writeBoolProperty(out, firstOpProperty, "value", op.value);
         }
@@ -798,6 +822,7 @@ private:
       out.print(']');
       out.print('}');
     }
+#endif
 
     out.print(']');
   }
@@ -807,6 +832,7 @@ private:
     out.print('[');
     bool firstTarget = true;
 
+#if ARMORLINK_HAS_ACTIONBUILDER
     for (const auto& target : module.actionBuilder().actionTargets(module.actions())) {
       if (!firstTarget) {
         out.print(',');
@@ -821,6 +847,7 @@ private:
       writeStringProperty(out, first, "command", target.command);
       out.print('}');
     }
+#endif
 
     out.print(']');
   }
@@ -952,7 +979,7 @@ private:
     String json;
     ArmorLinkDescriptorStringPrint out(json);
     if (!writeDocumentStreaming(module, out, profile) || out.failed()) {
-      Serial.printf("[DESCRIPTOR] JSON streaming failed (profile=%s)\n",
+      AL_INTERNAL_PRINTF("[DESCRIPTOR] JSON streaming failed (profile=%s)\n",
                     profileName(profile));
       return "";
     }
@@ -964,12 +991,18 @@ private:
                                Profile profile) {
     doc.clear();
 
-    const bool isWebSerial = profile == Profile::WebSerial;
+    const bool isWebSerial = ARMORLINK_HAS_WEB_SERIAL && profile == Profile::WebSerial;
 
     doc["module"] = module.name();
     doc["name"] = module.name();
     doc["moduleVersion"] = module.version();
     doc["armorLinkVersion"] = ARMORLINK_VERSION;
+    JsonObject features = doc.createNestedObject("features");
+    features["espNow"] = static_cast<bool>(ARMORLINK_HAS_ESPNOW);
+    features["ble"] = static_cast<bool>(ARMORLINK_HAS_BLE);
+    features["actionBuilder"] = static_cast<bool>(ARMORLINK_HAS_ACTIONBUILDER);
+    features["dataStreams"] = static_cast<bool>(ARMORLINK_HAS_DATASTREAMS);
+    features["webSerial"] = static_cast<bool>(ARMORLINK_HAS_WEB_SERIAL);
     if (isWebSerial) {
       doc["chipId"] = buildChipId();
       doc["espChipModel"] = String(ESP.getChipModel());
@@ -993,13 +1026,15 @@ private:
     const bool hasBuilderSurface = hasActionBuilderSurface(module);
     const bool hasBuilderDescriptor =
         isWebSerial &&
-        (hasBuilderSurface || module.actions().items().size() > 0);
+        (ARMORLINK_HAS_ACTIONBUILDER && (hasBuilderSurface || module.actions().items().size() > 0));
     doc["supportsPartialConfigGet"] = false;
     doc["supportsConfigSet"] = true;
     if (isWebSerial) {
+      doc["supportsStartupSequence"] = bool(ARMORLINK_HAS_ACTIONBUILDER);
+      doc["supportsLogMessages"] = bool(ARMORLINK_HAS_ACTIONBUILDER);
       doc["supportsActionBuilder"] =
-          hasBuilderSurface ||
-          module.actions().items().size() > 0;
+          ARMORLINK_HAS_ACTIONBUILDER &&
+          (hasBuilderSurface || module.actions().items().size() > 0);
     }
     doc["moduleType"] = moduleTypeToString(module.type());
     if (isWebSerial && !module.profileTarget().isEmpty()) {
@@ -1022,7 +1057,7 @@ private:
     appendSections(module, sections, profile);
 
     if (doc.overflowed()) {
-      Serial.printf("[DESCRIPTOR] JSON document overflowed (profile=%s)\n",
+      AL_INTERNAL_PRINTF("[DESCRIPTOR] JSON document overflowed (profile=%s)\n",
                     profileName(profile));
       return false;
     }
@@ -1040,9 +1075,13 @@ private:
   }
 
   static bool hasActionBuilderSurface(const ArmorLinkModule& module) {
+#if ARMORLINK_HAS_ACTIONBUILDER
     return module.actionBuilder().components().size() > 0 ||
            module.actionBuilder().definitions().size() > 0 ||
            module.actionBuilder().customActions().size() > 0;
+#else
+    return false;
+#endif
   }
 
   static const char* moduleTypeToString(ArmorLinkModuleType type) {
@@ -1110,6 +1149,7 @@ private:
       case ArmorLinkActionOpCode::ActionCall: return "action_call";
       case ArmorLinkActionOpCode::WaitUntilState: return "wait_until_state";
       case ArmorLinkActionOpCode::RepeatPrevious: return "repeat_previous";
+      case ArmorLinkActionOpCode::LogMessage: return "log_message";
       case ArmorLinkActionOpCode::StateSet: return "state_set";
       case ArmorLinkActionOpCode::SendActionToTarget: return "send_command_to_target";
       default: return "wait";
@@ -1119,6 +1159,8 @@ private:
   static void appendActionComponents(
       const ArmorLinkModule& module,
       JsonArray actionComponents) {
+
+#if ARMORLINK_HAS_ACTIONBUILDER
     for (const auto& component : module.actionBuilder().components()) {
       JsonObject out = actionComponents.createNestedObject();
       out["id"] = component.id;
@@ -1181,13 +1223,18 @@ private:
         }
       }
     }
+#endif
+
   }
 
   static void appendActionDefinitions(
       const ArmorLinkModule& module,
       JsonArray actionDefinitions) {
+
+#if ARMORLINK_HAS_ACTIONBUILDER
     for (const auto& definition : module.actionBuilder().definitions()) {
       JsonObject out = actionDefinitions.createNestedObject();
+      out["startup"] = definition.startup;
       out["entity"] = definition.entity;
       out["command"] = definition.command;
       if (!definition.label.isEmpty()) {
@@ -1220,6 +1267,10 @@ private:
           opOut["animation"] = op.option == 1 ? "pulse" : op.option == 2 ? "blink" : op.option == 3 ? "chase" : op.option == 4 ? "solid" : "rainbow";
           opOut["durationMs"] = op.durationMs;
         }
+        if (op.code == ArmorLinkActionOpCode::LogMessage && op.logMessage) {
+          opOut["level"] = op.logMessage->level == AL_LOG_DEBUG ? "debug" : op.logMessage->level == AL_LOG_WARN ? "warn" : op.logMessage->level == AL_LOG_ERROR ? "error" : "info";
+          opOut["text"] = op.logMessage->text;
+        }
         if (op.code == ArmorLinkActionOpCode::StateSet) {
           opOut["value"] = op.value;
         }
@@ -1238,11 +1289,15 @@ private:
         }
       }
     }
+#endif
+
   }
 
   static void appendActionTargets(
       const ArmorLinkModule& module,
       JsonArray actionTargets) {
+
+#if ARMORLINK_HAS_ACTIONBUILDER
     for (const auto& target : module.actionBuilder().actionTargets(module.actions())) {
       JsonObject out = actionTargets.createNestedObject();
       out["id"] = target.id;
@@ -1250,10 +1305,12 @@ private:
       out["entity"] = target.entity;
       out["command"] = target.command;
     }
+#endif
+
   }
 
   static void appendSections(const ArmorLinkModule& module, JsonArray sections, Profile profile) {
-    const bool isWebSerial = profile == Profile::WebSerial;
+    const bool isWebSerial = ARMORLINK_HAS_WEB_SERIAL && profile == Profile::WebSerial;
     std::vector<String> orderedSections;
     bool hasArmorLinkSection = false;
 
@@ -1293,7 +1350,8 @@ private:
       }
     }
 
-    for (const auto& action : module.actionBuilder().customActions()) {
+#if ARMORLINK_HAS_ACTIONBUILDER
+      for (const auto& action : module.actionBuilder().customActions()) {
       const String actionSection =
           action.section.isEmpty() ? String("Actions") : action.section;
 
@@ -1309,6 +1367,7 @@ private:
         orderedSections.push_back(actionSection);
       }
     }
+#endif
 
     if (isWebSerial && hasArmorLinkSection) {
       // System actions may already have registered this section. Move it to
@@ -1472,6 +1531,7 @@ private:
         appendAction(action, out, profile, false);
       }
 
+#if ARMORLINK_HAS_ACTIONBUILDER
       for (const auto& action : module.actionBuilder().customActions()) {
         const String actionSection =
             action.section.isEmpty() ? String("Actions") : action.section;
@@ -1483,6 +1543,8 @@ private:
         JsonObject out = actions.createNestedObject();
         appendAction(action, out, profile, true);
       }
+#endif
+
     }
   }
 
@@ -1491,7 +1553,7 @@ private:
       JsonObject out,
       Profile profile,
       bool isCustomAction = false) {
-    const bool isWebSerial = profile == Profile::WebSerial;
+    const bool isWebSerial = ARMORLINK_HAS_WEB_SERIAL && profile == Profile::WebSerial;
     out["id"] = action.id;
     out["label"] = action.label;
     out["entity"] = action.entity;

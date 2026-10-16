@@ -8,14 +8,6 @@
 #include <utility>
 #include <vector>
 
-#ifndef ARMORLINK_SERIAL_COMMAND_MAX_LEN
-#define ARMORLINK_SERIAL_COMMAND_MAX_LEN 31
-#endif
-
-#ifndef ARMORLINK_SERIAL_LINE_MAX_LEN
-#define ARMORLINK_SERIAL_LINE_MAX_LEN 1024
-#endif
-
 static constexpr const char* ARMORLINK_FLASHER_PREFIX = "@ALF:";
 
 using ArmorLinkSerialCommandHandler =
@@ -41,7 +33,7 @@ public:
         String normalized = normalize(name);
 
         if (!isValidUserCommandName(normalized)) {
-            Serial.printf(
+            AL_INTERNAL_PRINTF(
                 "[SERIAL] Invalid or reserved command name: %s\n",
                 name.c_str()
             );
@@ -49,7 +41,7 @@ public:
         }
 
         if (!handler) {
-            Serial.printf(
+            AL_INTERNAL_PRINTF(
                 "[SERIAL] Command has no handler: %s\n",
                 normalized.c_str()
             );
@@ -57,7 +49,7 @@ public:
         }
 
         if (contains(normalized)) {
-            Serial.printf(
+            AL_INTERNAL_PRINTF(
                 "[SERIAL] Command already registered: %s\n",
                 normalized.c_str()
             );
@@ -234,7 +226,7 @@ public:
                 _line += c;
             } else {
                 _line = "";
-                Serial.println(
+                AL_INTERNAL_PRINTLN(
                     "[SERIAL] Input line exceeded maximum length"
                 );
             }
@@ -245,6 +237,7 @@ public:
         String line = input;
         line.trim();
 
+#if ARMORLINK_HAS_WEB_SERIAL
         if (line.startsWith(ARMORLINK_FLASHER_PREFIX)) {
             const String payload = line.substring(
                 strlen(ARMORLINK_FLASHER_PREFIX)
@@ -255,6 +248,7 @@ public:
                 : false;
         }
 
+#endif
         const int separator =
             findFirstWhitespace(line);
 

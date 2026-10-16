@@ -2,6 +2,8 @@
 #ifndef ARMORLINK_TRANSPORT_ESPNOW_H
 #define ARMORLINK_TRANSPORT_ESPNOW_H
 
+#include "ArmorLinkDebug.h"
+#if ARMORLINK_HAS_ESPNOW
 #if defined(ESP8266)
   #include <ESP8266WiFi.h>
   extern "C" {
@@ -58,9 +60,6 @@ private:
 
 class ArmorLinkTransportEspNow {
 public:
-#ifndef ARMORLINK_ESPNOW_QUEUE_SIZE
-#define ARMORLINK_ESPNOW_QUEUE_SIZE 64
-#endif
   static constexpr size_t DEFAULT_QUEUE_SIZE = ARMORLINK_ESPNOW_QUEUE_SIZE;
   static_assert(DEFAULT_QUEUE_SIZE >= 2, "ESP-NOW queue needs at least two slots");
   static constexpr uint16_t CONFIG_META_SETTLE_DELAY_MS = 200;
@@ -126,6 +125,43 @@ public:
   void setPeerRegistry(ArmorLinkPeerRegistry* registry) {
     _registry = registry;
   }
+
+  // WiFi callbacks must not print, allocate Strings, notify BLE or retry sends.
+  void recordReceiveError(bool invalidPacket) {
+    lockCallbacks();
+    uint32_t& counter = invalidPacket ? _invalidReceivedPackets : _droppedReceivedPackets;
+    if (counter != UINT32_MAX) ++counter;
+    unlockCallbacks();
+  }
+
+  void processCallbacks() {
+    uint32_t invalid, dropped, droppedStatuses;
+    lockCallbacks();
+    invalid = _invalidReceivedPackets;
+    dropped = _droppedReceivedPackets;
+    droppedStatuses = _droppedSendStatuses;
+    _invalidReceivedPackets = _droppedReceivedPackets = _droppedSendStatuses = 0;
+    unlockCallbacks();
+    if (invalid || dropped || droppedStatuses) {
+      AL_INTERNAL_PRINTF("[ESPNOW][WARN] invalidPackets=%lu rxQueueFull=%lu txStatusQueueFull=%lu\n",
+        (unsigned long)invalid, (unsigned long)dropped, (unsigned long)droppedStatuses);
+    }
+    // Bound work even when processing a status causes another send.
+    for (size_t i = 0; i < SEND_STATUS_QUEUE_SIZE; ++i) {
+      PendingSendStatus event{};
+      lockCallbacks();
+      if (_sendStatusCount == 0) {
+        unlockCallbacks();
+        break;
+      }
+      event = _sendStatuses[_sendStatusTail];
+      _sendStatusTail = (_sendStatusTail + 1) % SEND_STATUS_QUEUE_SIZE;
+      --_sendStatusCount;
+      unlockCallbacks();
+      if (_managedSendFn) _managedSendFn(event.mac, event.status);
+    }
+  }
+
 esp_err_t ensurePeer(const uint8_t* mac) {
   if (!mac) return ESP_ERR_NOT_FOUND;
 
@@ -161,17 +197,27 @@ esp_err_t ensurePeer(const uint8_t* mac) {
 #endif
 }
   bool enqueueReceivedPacket(const ArmorLinkPacket& msg) {
+    lockCallbacks();
     size_t next = (_queueHead + 1) % DEFAULT_QUEUE_SIZE;
-    if (next == _queueTail) return false;
+    if (next == _queueTail) {
+      unlockCallbacks();
+      return false;
+    }
     _queue[_queueHead] = msg;
     _queueHead = next;
+    unlockCallbacks();
     return true;
   }
 
   bool dequeueReceivedPacket(ArmorLinkPacket& msg) {
-    if (_queueTail == _queueHead) return false;
+    lockCallbacks();
+    if (_queueTail == _queueHead) {
+      unlockCallbacks();
+      return false;
+    }
     msg = _queue[_queueTail];
     _queueTail = (_queueTail + 1) % DEFAULT_QUEUE_SIZE;
+    unlockCallbacks();
     return true;
   }
 
@@ -198,8 +244,8 @@ esp_err_t ensurePeer(const uint8_t* mac) {
     if (!mac) return ESP_ERR_NOT_FOUND;
 
 #if defined(ESP32)
-    WiFi.setSleep(false);
-    esp_wifi_set_ps(WIFI_PS_NONE);
+    // Power saving is configured once in begin(). Do not reconfigure the
+    // shared radio for every packet (especially while BLE is active).
 
     if (millis() - _lastChannelFix > 300000UL) {
       _lastChannelFix = millis();
@@ -405,6 +451,42 @@ esp_err_t ensurePeer(const uint8_t* mac) {
   }
 
 private:
+  static constexpr size_t SEND_STATUS_QUEUE_SIZE = 8;
+  struct PendingSendStatus {
+    uint8_t mac[6];
+    esp_now_send_status_t status;
+  };
+#if defined(ESP32)
+  portMUX_TYPE _callbackMux = portMUX_INITIALIZER_UNLOCKED;
+#endif
+  PendingSendStatus _sendStatuses[SEND_STATUS_QUEUE_SIZE]{};
+  size_t _sendStatusHead = 0, _sendStatusTail = 0, _sendStatusCount = 0;
+  uint32_t _invalidReceivedPackets = 0, _droppedReceivedPackets = 0, _droppedSendStatuses = 0;
+
+  void lockCallbacks() {
+#if defined(ESP32)
+    portENTER_CRITICAL(&_callbackMux);
+#endif
+  }
+  void unlockCallbacks() {
+#if defined(ESP32)
+    portEXIT_CRITICAL(&_callbackMux);
+#endif
+  }
+  void enqueueSendStatus(const uint8_t* mac, esp_now_send_status_t status) {
+    if (!mac) return;
+    lockCallbacks();
+    if (_sendStatusCount == SEND_STATUS_QUEUE_SIZE) {
+      if (_droppedSendStatuses != UINT32_MAX) ++_droppedSendStatuses;
+    } else {
+      PendingSendStatus& event = _sendStatuses[_sendStatusHead];
+      memcpy(event.mac, mac, sizeof(event.mac));
+      event.status = status;
+      _sendStatusHead = (_sendStatusHead + 1) % SEND_STATUS_QUEUE_SIZE;
+      ++_sendStatusCount;
+    }
+    unlockCallbacks();
+  }
   ArmorLinkPeerRegistry* _registry = nullptr;
   uint8_t _channel = 1;
   unsigned long _lastChannelFix = 0;
@@ -429,9 +511,7 @@ private:
 
   static void onSentStatic(const uint8_t* mac_addr, esp_now_send_status_t status) {
     ArmorLinkTransportEspNow* self = instance();
-    if (self && self->_managedSendFn) {
-      self->_managedSendFn(mac_addr, status);
-    }
+    if (self) self->enqueueSendStatus(mac_addr, status);
   }
 #elif defined(ESP8266)
   static void onReceiveStatic(uint8_t* mac, uint8_t* data, uint8_t len) {
@@ -444,9 +524,7 @@ private:
 
   static void onSentStatic(uint8_t* mac_addr, uint8_t status) {
     ArmorLinkTransportEspNow* self = instance();
-    if (self && self->_managedSendFn) {
-      self->_managedSendFn(mac_addr, (esp_now_send_status_t)status);
-    }
+    if (self) self->enqueueSendStatus(mac_addr, (esp_now_send_status_t)status);
   }
 #endif
 
@@ -461,4 +539,79 @@ public:
   }
 };
 
+
+#else
+#include <Arduino.h>
+#include <esp_err.h>
+#include <esp_now.h> // callback types only; no ESP-NOW or WiFi implementation
+#include "ArmorLinkProtocol.h"
+using ArmorLinkManagedReceiveFn = void (*)(const uint8_t*, int);
+using ArmorLinkManagedSendFn = void (*)(const uint8_t*, esp_now_send_status_t);
+class ArmorLinkPeerRegistry {
+public:
+  void removePeer(const String&) {}
+  void registerPeer(const String&, const uint8_t*) {}
+  const uint8_t* getMacForTarget(const String&) const { return nullptr; }
+  String getNameForMac(const uint8_t*) const { return "Unknown"; }
+};
+class ArmorLinkTransportEspNow {
+public:
+  void processCallbacks() {}
+  void recordReceiveError(bool) {}
+  static constexpr uint16_t CONFIG_TRANSFER_CHUNK_DATA_SIZE = ARMORLINK_CHUNK_DATA_SIZE;
+  void setManagedHandlers(ArmorLinkManagedReceiveFn receiveFn, ArmorLinkManagedSendFn sendFn) {  }
+  bool begin(
+    uint8_t channel = 1,
+    esp_now_recv_cb_t onReceive = nullptr,
+    esp_now_send_cb_t onSent = nullptr) { return false; }
+  bool beginManaged(uint8_t channel = 1) { return false; }
+  void setPeerRegistry(ArmorLinkPeerRegistry* registry) {  }
+  esp_err_t ensurePeer(const uint8_t* mac) { return ESP_ERR_NOT_SUPPORTED; }
+  bool enqueueReceivedPacket(const ArmorLinkPacket& msg) { return false; }
+  bool dequeueReceivedPacket(ArmorLinkPacket& msg) { return false; }
+  bool hasQueuedPackets() const { return false; }
+  bool decodeIncomingPacket(const uint8_t* data, int len, ArmorLinkPacket& incoming) { return false; }
+  esp_err_t sendToMac(const uint8_t* mac, const void* data, size_t len) { return ESP_ERR_NOT_SUPPORTED; }
+  esp_err_t sendPacketToMac(const uint8_t* mac, const ArmorLinkPacket& packet) { return ESP_ERR_NOT_SUPPORTED; }
+  esp_err_t sendPacketToTarget(const String& target, const ArmorLinkPacket& packet) { return ESP_ERR_NOT_SUPPORTED; }
+  esp_err_t sendLogToTarget(
+    const String& target,
+    const char* source,
+    ArmorLinkLogLevel level,
+    const char* entity,
+    const char* command,
+    const String& message,
+    int32_t valueInt = 0,
+    float valueFloat = 0.0f,
+    float batteryVoltage = 0.0f
+  ) { return ESP_ERR_NOT_SUPPORTED; }
+  esp_err_t sendLogToChest(
+    const char* source,
+    ArmorLinkLogLevel level,
+    const char* entity,
+    const char* command,
+    const String& message,
+    int32_t valueInt = 0,
+    float valueFloat = 0.0f,
+    float batteryVoltage = 0.0f
+  ) { return ESP_ERR_NOT_SUPPORTED; }
+  esp_err_t sendConfigJsonChunkedToTarget(
+    const String& target,
+    const char* source,
+    uint16_t requestId,
+    const char* entity,
+    const String& json,
+    bool partial = false
+  ) { return ESP_ERR_NOT_SUPPORTED; }
+  esp_err_t sendConfigJsonChunkedToMac(
+    const uint8_t* mac,
+    const char* target,
+    const char* source,
+    uint16_t requestId,
+    const char* entity,
+    const String& json,
+    bool partial = false
+  ) { return ESP_ERR_NOT_SUPPORTED; }
+};
+#endif // ARMORLINK_HAS_ESPNOW
 #endif

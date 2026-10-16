@@ -3,6 +3,7 @@
 #include "ArmorLinkDebug.h"
 #include <Arduino.h>
 #include <functional>
+#include <memory>
 #include <vector>
 #include "ArmorLinkProtocol.h"
 #include "ArmorLinkSerial.h"
@@ -56,7 +57,13 @@ enum class ArmorLinkActionOpCode : uint8_t {
   ServoMoveTo = 14,
   LedSetColor = 15,
   LedSetBrightness = 16,
-  LedAnimation = 17
+  LedAnimation = 17,
+  LogMessage = 32
+};
+
+struct ArmorLinkActionLogMessage {
+  ArmorLinkLogLevel level = AL_LOG_INFO;
+  String text;
 };
 
 struct ArmorLinkActionOp {
@@ -68,6 +75,7 @@ struct ArmorLinkActionOp {
   uint8_t option = 0;
   uint8_t intensity = 255;
   bool value = true;
+  std::shared_ptr<const ArmorLinkActionLogMessage> logMessage;
 };
 
 struct ArmorLinkActionDefinition {
@@ -76,6 +84,7 @@ struct ArmorLinkActionDefinition {
   String label;
   String section = "Actions";
   std::vector<ArmorLinkActionOp> ops;
+  bool startup = false;
 };
 
 struct ArmorLinkActionTargetDef {
@@ -854,6 +863,7 @@ private:
   std::vector<ArmorLinkActionDef> _actions;
 };
 
+#if ARMORLINK_HAS_ACTIONBUILDER
 class ArmorLinkActionComponentBuilder {
 public:
   explicit ArmorLinkActionComponentBuilder(ArmorLinkActionComponentDef& component)
@@ -1127,6 +1137,31 @@ public:
     return -1;
   }
 
+  using LogHandler = std::function<void(ArmorLinkLogLevel, const String&)>;
+  void onLog(LogHandler handler) { _logHandler = handler; }
+
+  // Templates are bounded in UTF-8 bytes and resolve state values at execution.
+  bool renderLogMessage(const String& text, String& output, bool resolve = true) const {
+    if (text.isEmpty() || text.length() > 128) return false;
+    output = "";
+    size_t cursor = 0;
+    while (cursor < text.length()) {
+      int start = text.indexOf("{state:", cursor);
+      if (start < 0) { output += text.substring(cursor); break; }
+      output += text.substring(cursor, start);
+      int end = text.indexOf('}', start + 7);
+      if (end < 0) return false;
+      String id = text.substring(start + 7, end);
+      int index = findComponentIndex(id);
+      if (index < 0 || _components[index].kind != ArmorLinkActionComponentKind::State) return false;
+      const auto& state = _components[index];
+      bool value = resolve ? (state.isReady ? state.isReady() : state.ready) : false;
+      output += value ? "true" : "false";
+      cursor = end + 1;
+    }
+    return true;
+  }
+
   void onRemoteAction(ArmorLinkRemoteActionHandler handler) {
     _remoteActionHandler = handler;
   }
@@ -1257,7 +1292,26 @@ public:
     return -1;
   }
 
+  const ArmorLinkActionDefinition* startupDefinition() const {
+    for (const auto& definition : _definitions) if (definition.startup) return &definition;
+    return nullptr;
+  }
+
+  void armStartup() { _startupPending = startupDefinition() != nullptr; }
+
+  bool runStartupOnce(const ArmorLinkActionRegistry& actions) {
+    if (!_startupPending || _running) return false;
+    _startupPending = false;
+    const auto* definition = startupDefinition();
+    return definition != nullptr && executeDefinition(*definition, actions);
+  }
+
   bool setDefinition(const ArmorLinkActionDefinition& definition) {
+    if (definition.startup) {
+      for (auto& existing : _definitions) {
+        if (!existing.entity.equalsIgnoreCase(definition.entity) || !existing.command.equalsIgnoreCase(definition.command)) existing.startup = false;
+      }
+    }
     for (auto& existing : _definitions) {
       if (existing.entity.equalsIgnoreCase(definition.entity) &&
           existing.command.equalsIgnoreCase(definition.command)) {
@@ -1552,6 +1606,14 @@ private:
       return false;
     }
 
+    if (op.code == ArmorLinkActionOpCode::LogMessage) {
+      if (!_logHandler || !op.logMessage || op.logMessage->level > AL_LOG_ERROR) return false;
+      String message;
+      if (!renderLogMessage(op.logMessage->text, message)) return false;
+      _logHandler(op.logMessage->level, message);
+      return true;
+    }
+
     if (op.code == ArmorLinkActionOpCode::SendActionToTarget) {
       if (!_remoteActionHandler ||
           op.argument >= _remoteCommands.size()) {
@@ -1668,6 +1730,8 @@ private:
   std::vector<ArmorLinkActionDef> _customActions;
   std::vector<ArmorLinkActionDefinition> _definitions;
   std::vector<ArmorLinkRemoteCommandDef> _remoteCommands;
+  bool _startupPending = false;
+  LogHandler _logHandler;
   std::vector<ArmorLinkActionOp> _activeOps;
   size_t _activeIndex = 0;
   uint32_t _waitStartedAtMs = 0;
@@ -1678,6 +1742,8 @@ private:
   bool _waitingForState = false;
   ArmorLinkRemoteActionHandler _remoteActionHandler;
 };
+
+#endif // ARMORLINK_HAS_ACTIONBUILDER
 
 class ArmorLinkModule {
 public:
@@ -1766,8 +1832,11 @@ public:
   ArmorLinkActionRegistry& actions() { return _actions; }
   const ArmorLinkActionRegistry& actions() const { return _actions; }
 
+#if ARMORLINK_HAS_ACTIONBUILDER
   ArmorLinkActionBuilderRuntime& actionBuilder() { return _actionBuilder; }
   const ArmorLinkActionBuilderRuntime& actionBuilder() const { return _actionBuilder; }
+
+#endif
 
   ArmorLinkSerialRegistry& serial() {
       return _serial;
@@ -1794,6 +1863,8 @@ private:
   bool _profileNameImported = false;
   ArmorLinkConfigRegistry _config;
   ArmorLinkActionRegistry _actions;
+#if ARMORLINK_HAS_ACTIONBUILDER
   ArmorLinkActionBuilderRuntime _actionBuilder;
+#endif
   ArmorLinkSerialRegistry _serial;
 };
