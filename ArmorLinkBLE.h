@@ -7,7 +7,9 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#if !defined(CONFIG_NIMBLE_ENABLED)
 #include <BLE2902.h>
+#endif
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
 #include "ArmorLinkProtocol.h"
@@ -119,9 +121,13 @@ public:
       _eventTxChar->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM);
     }
 
+#if !defined(CONFIG_NIMBLE_ENABLED)
+    // NimBLE creates the 0x2902 CCCD itself for NOTIFY characteristics and
+    // ignores a manually added one (BLE2902 is deprecated there).
     BLE2902* eventCccd = new BLE2902();
     eventCccd->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
     _eventTxChar->addDescriptor(eventCccd);
+#endif
 
     _logTxChar = service->createCharacteristic(
       ARMORLINK_LOG_TX_UUID,
@@ -132,9 +138,11 @@ public:
       _logTxChar->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM);
     }
 
+#if !defined(CONFIG_NIMBLE_ENABLED)
     BLE2902* logCccd = new BLE2902();
     logCccd->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
     _logTxChar->addDescriptor(logCccd);
+#endif
 
     service->start();
 
