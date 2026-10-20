@@ -971,7 +971,7 @@ uint32_t onPassKeyRequest() override {
 
   uint32_t pin = ArmorLinkSecurity::getPin();
 
-  AL_INTERNAL_PRINTF("[BLE] Passkey requested -> %06lu\n", (unsigned long)pin);
+  AL_INTERNAL_PRINTLN("[BLE] Passkey requested");
 
   return pin;
 
@@ -979,20 +979,20 @@ uint32_t onPassKeyRequest() override {
 
   void onPassKeyNotify(uint32_t pass_key) override {
 
-    AL_INTERNAL_PRINTF("[BLE] Passkey notify: %06lu\n", (unsigned long)pass_key);
+    (void)pass_key;
+
+    AL_INTERNAL_PRINTLN("[BLE] Passkey notify");
 
   }
 bool onConfirmPIN(uint32_t pass_key) override {
 
   uint32_t pin = ArmorLinkSecurity::getPin();
 
-  AL_INTERNAL_PRINTF("[BLE] Confirm PIN: received=%06lu expected=%06lu\n",
+  const bool match = pass_key == pin;
 
-                (unsigned long)pass_key,
+  AL_INTERNAL_PRINTF("[BLE] Confirm PIN: %s\n", match ? "match" : "mismatch");
 
-                (unsigned long)pin);
-
-  return pass_key == pin;
+  return match;
 
 }
 

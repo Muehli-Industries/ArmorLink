@@ -7207,10 +7207,9 @@ static void handleBleConnectedStatic() {
     const String gatewayMac  = String((const char*)(doc["gm"] | doc["gatewayMac"] | ""));
     const uint32_t recoveryPin = doc["rp"] | doc["recoveryPin"] | 0;
 
-    AL_INTERNAL_PRINTF("[PAIR] gatewayName=%s gatewayMac=%s recoveryPin=%lu\n",
+    AL_INTERNAL_PRINTF("[PAIR] gatewayName=%s gatewayMac=%s\n",
                   gatewayName.c_str(),
-                  gatewayMac.c_str(),
-                  (unsigned long)recoveryPin);
+                  gatewayMac.c_str());
 
     if (gatewayName.isEmpty() || gatewayMac.isEmpty()) {
       return;
