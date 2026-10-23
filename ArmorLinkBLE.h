@@ -7,7 +7,9 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#if !defined(CONFIG_NIMBLE_ENABLED)
 #include <BLE2902.h>
+#endif
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
 #include "ArmorLinkProtocol.h"
@@ -55,21 +57,26 @@ public:
     if (ArmorLinkSecurity::isPinSet()) {
       AL_VERBOSELN("?? Starte BLE im SECURE MODE");
 
-      BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
+      BLEDevice::setSecurityCallbacks(new SecurityCallbackBridge(this));
 
-  BLEDevice::setSecurityCallbacks(new SecurityCallbackBridge());
-  uint32_t pin = ArmorLinkSecurity::getPin();
-  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
-  esp_ble_io_cap_t iocap = ESP_IO_CAP_OUT;
-  uint8_t key_size = 16;
-  uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-  uint8_t rsp_key  = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &pin, sizeof(pin));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(rsp_key));
+      // Backend-neutral equivalents of the raw esp_ble_gap_set_security_param()
+      // calls this block used to make. The core's BLESecurity class dispatches to
+      // Bluedroid or NimBLE, and shims the ESP_* constants below for NimBLE.
+      uint32_t pin = ArmorLinkSecurity::getPin();
+      BLESecurity::setPassKey(true, pin);                    // static passkey
+      BLESecurity::setAuthenticationMode(true, true, true);  // bonding, MITM, SC
+      BLESecurity::setCapability(ESP_IO_CAP_OUT);
+      BLESecurity::setKeySize(16);
+      BLESecurity::setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+      BLESecurity::setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+#if defined(CONFIG_BLUEDROID_ENABLED)
+      // ENCRYPT_MITM, not ENCRYPT: the characteristics require ENC_MITM, so a
+      // stack-initiated ENCRYPT-only request could start a Just Works bond that
+      // then fails the MITM permission instead of escalating to passkey pairing.
+      // Redundant with setAuthenticationMode(true, true, true), which already
+      // sets this level internally; kept explicit. Unvalidated on hardware.
+      BLESecurity::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
+#endif
     } else {
       AL_VERBOSELN("?? Starte BLE im SETUP MODE (ohne PIN)");
     }
@@ -79,42 +86,63 @@ public:
 
     BLEService* service = _server->createService(ARMORLINK_SERVICE_UUID);
 
+    // Enforcement is on AUTHEN, not merely ENC. PROPERTY_*_ENC requires only an
+    // ENCRYPTED link, which a NoInputNoOutput central satisfies via Just Works
+    // against this peripheral's DisplayOnly -- pairing with no passkey and then
+    // writing commands with the PIN never used. PROPERTY_*_AUTHEN requires an
+    // AUTHENTICATED (MITM) link, which Just Works cannot produce. ENC is kept
+    // alongside AUTHEN as defence in depth.
+    //
+    // BLECharacteristic::setAccessPermissions() below is a no-op on NimBLE; it
+    // carries the equivalent ESP_GATT_PERM_*_ENC_MITM requirement on Bluedroid,
+    // where PROPERTY_*_AUTHEN is defined as 0.
+    uint32_t rxSecProp = ArmorLinkSecurity::isPinSet()
+      ? (BLECharacteristic::PROPERTY_WRITE_ENC | BLECharacteristic::PROPERTY_WRITE_AUTHEN) : 0;
+    uint32_t txSecProp = ArmorLinkSecurity::isPinSet()
+      ? (BLECharacteristic::PROPERTY_READ_ENC | BLECharacteristic::PROPERTY_READ_AUTHEN) : 0;
+
     _commandRxChar = service->createCharacteristic(
       ARMORLINK_COMMAND_RX_UUID,
-      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
+      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR | rxSecProp
     );
 
     if (ArmorLinkSecurity::isPinSet()) {
-      _commandRxChar->setAccessPermissions(ESP_GATT_PERM_WRITE_ENCRYPTED);
+      _commandRxChar->setAccessPermissions(ESP_GATT_PERM_WRITE_ENC_MITM);
     }
 
     _commandRxChar->setCallbacks(new CommandRxCallbackBridge(this));
 
     _eventTxChar = service->createCharacteristic(
       ARMORLINK_EVENT_TX_UUID,
-      BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ
+      BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ | txSecProp
     );
 
     if (ArmorLinkSecurity::isPinSet()) {
-      _eventTxChar->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED);
+      _eventTxChar->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM);
     }
 
+#if !defined(CONFIG_NIMBLE_ENABLED)
+    // NimBLE creates the 0x2902 CCCD itself for NOTIFY characteristics and
+    // ignores a manually added one (BLE2902 is deprecated there).
     BLE2902* eventCccd = new BLE2902();
     eventCccd->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
     _eventTxChar->addDescriptor(eventCccd);
+#endif
 
     _logTxChar = service->createCharacteristic(
       ARMORLINK_LOG_TX_UUID,
-      BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ
+      BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ | txSecProp
     );
 
     if (ArmorLinkSecurity::isPinSet()) {
-      _logTxChar->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED);
+      _logTxChar->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM);
     }
 
+#if !defined(CONFIG_NIMBLE_ENABLED)
     BLE2902* logCccd = new BLE2902();
     logCccd->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
     _logTxChar->addDescriptor(logCccd);
+#endif
 
     service->start();
 
@@ -709,6 +737,64 @@ private:
     _pendingConfigPartial = false;
   }
 
+  // Defence in depth for a peer that completed pairing WITHOUT MITM (Just Works).
+  // The AUTHEN property bits already refuse its reads and writes, but a NOTIFY
+  // subscription is a CCCD write those bits do not gate, so an unauthenticated
+  // peer could still passively receive the event/log stream. Dropping the
+  // connection closes every surface at once, including any future characteristic
+  // added without the AUTHEN bit.
+  //
+  // The bond is deleted as part of the drop. setAuthenticationMode(true, ...)
+  // asks for bonding, so the Just Works key is already in NVS when this runs.
+  // Leaving it causes a reconnect/drop loop that churns NVS, and because the
+  // store holds only a few peers (NimBLE default 3), an attacker cycling
+  // pair->drop from a few addresses could evict the owner's authenticated bond.
+#if defined(CONFIG_NIMBLE_ENABLED)
+  void dropUnauthenticated(const ble_gap_conn_desc* desc) {
+    if (_server == nullptr || desc == nullptr) return;
+    // The core raises onAuthenticationComplete for every ENC_CHANGE, including
+    // failures, which leave the link unencrypted. That is not a downgrade, and
+    // the AUTHEN bits plus NimBLE's notify() encrypted check already refuse it.
+    // Dropping would deny an in-place re-pair after an NVS erase or reflash,
+    // where the owner's phone still holds the old key and the restore fails.
+    if (!desc->sec_state.encrypted) {
+      AL_VERBOSELN("? Pairing/Restore fehlgeschlagen -- Link bleibt, Zugriff verweigert");
+      return;
+    }
+    AL_VERBOSELN("? Nicht authentifiziert (kein MITM) -- Verbindung wird getrennt");
+    // Terminate first and unconditionally. ble_gap_unpair() also terminates, but
+    // it looks the connection up by the IDENTITY address, which misses when the
+    // central connected on a resolvable private address (phones do by default)
+    // while still returning 0 -- relying on it would fail open.
+    _server->disconnect(desc->conn_handle);
+    // Unpair only if a bond was actually persisted. A non-bonding Just Works
+    // pairing is encrypted but stores nothing, so unpairing there could only
+    // delete a pre-existing authenticated bond for the same identity.
+    if (desc->sec_state.bonded) {
+      ble_gap_unpair(&desc->peer_id_addr);
+    }
+  }
+#else
+  // Bluedroid: esp_ble_auth_cmpl_t carries a bd_addr but no conn id, so close the
+  // server's current connection. ArmorLink serves one central at a time, so that
+  // is the peer whose pairing just completed. bondPersisted follows the same rule
+  // as the NimBLE side: success AND the ESP_LE_AUTH_BOND bit.
+  // ponytail: single-peer assumption; needs a bd_addr -> conn id map from
+  // getPeerDevices() if concurrent centrals are ever accepted.
+  void dropCurrentUnauthenticated(esp_bd_addr_t peerAddr, bool bondPersisted) {
+    if (_server == nullptr) return;
+    AL_VERBOSELN("? Nicht authentifiziert (kein MITM) -- Verbindung wird getrennt");
+    if (_server->getConnectedCount() > 0) {
+      _server->disconnect(_server->getConnId());
+    }
+    // Handles unpairing while connected (esp_gap_ble_api.h), so it does not
+    // wait on the close above.
+    if (bondPersisted) {
+      esp_ble_remove_bond_device(peerAddr);
+    }
+  }
+#endif
+
   void onConnected() {
     _clientConnected = true;
     AL_VERBOSELN("?? BLE Client verbunden");
@@ -879,11 +965,13 @@ private:
 
 public:
 
+explicit SecurityCallbackBridge(ArmorLinkBleRuntime* runtime) : _runtime(runtime) {}
+
 uint32_t onPassKeyRequest() override {
 
   uint32_t pin = ArmorLinkSecurity::getPin();
 
-  AL_INTERNAL_PRINTF("[BLE] Passkey requested -> %06lu\n", (unsigned long)pin);
+  AL_INTERNAL_PRINTLN("[BLE] Passkey requested");
 
   return pin;
 
@@ -891,20 +979,20 @@ uint32_t onPassKeyRequest() override {
 
   void onPassKeyNotify(uint32_t pass_key) override {
 
-    AL_INTERNAL_PRINTF("[BLE] Passkey notify: %06lu\n", (unsigned long)pass_key);
+    (void)pass_key;
+
+    AL_INTERNAL_PRINTLN("[BLE] Passkey notify");
 
   }
 bool onConfirmPIN(uint32_t pass_key) override {
 
   uint32_t pin = ArmorLinkSecurity::getPin();
 
-  AL_INTERNAL_PRINTF("[BLE] Confirm PIN: received=%06lu expected=%06lu\n",
+  const bool match = pass_key == pin;
 
-                (unsigned long)pass_key,
+  AL_INTERNAL_PRINTF("[BLE] Confirm PIN: %s\n", match ? "match" : "mismatch");
 
-                (unsigned long)pin);
-
-  return pass_key == pin;
+  return match;
 
 }
 
@@ -914,22 +1002,57 @@ bool onConfirmPIN(uint32_t pass_key) override {
 
   }
 
+#if defined(CONFIG_NIMBLE_ENABLED)
+  void onAuthenticationComplete(ble_gap_conn_desc* desc) override {
+
+    // .authenticated, not .encrypted: Just Works yields an encrypted link that
+    // is NOT authenticated, and this signal must agree with the AUTHEN bits.
+
+    if (desc != nullptr && desc->sec_state.authenticated) {
+
+      AL_INTERNAL_PRINTF("[BLE] Authentication successful: encrypted=%u bonded=%u\n",
+                    (unsigned)desc->sec_state.encrypted, (unsigned)desc->sec_state.bonded);
+
+    } else {
+
+      AL_INTERNAL_PRINTLN("[BLE] Authentication failed (no MITM)");
+      _runtime->dropUnauthenticated(desc);
+
+    }
+
+  }
+#else
   void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) override {
 
-    if (cmpl.success) {
+    // Same rule as the NimBLE overload: success alone is true for Just Works,
+    // so require the MITM bit in auth_mode.
+
+    if (cmpl.success && (cmpl.auth_mode & ESP_LE_AUTH_REQ_MITM)) {
 
       AL_INTERNAL_PRINTF("[BLE] Authentication successful: authMode=0x%02x\n",
                     (unsigned)cmpl.auth_mode);
 
     } else {
 
-      AL_INTERNAL_PRINTF("[BLE] Authentication failed: reason=0x%02x\n",
-                    (unsigned)cmpl.fail_reason);
+      AL_INTERNAL_PRINTF("[BLE] Authentication failed: success=%u authMode=0x%02x reason=0x%02x\n",
+                    (unsigned)cmpl.success, (unsigned)cmpl.auth_mode, (unsigned)cmpl.fail_reason);
+
+      // The drop matters more here: Bluedroid's notify() performs no security
+      // check, so it is the only notify defence. A FAILED pairing leaves no
+      // encrypted link and no key, so only a successful non-MITM one is dropped.
+      // Known gap: a central that never answers the Security Request raises no
+      // AUTH_CMPL and is never dropped; gating the CCCDs would close it.
+      if (cmpl.success) {
+        _runtime->dropCurrentUnauthenticated(cmpl.bd_addr, (cmpl.auth_mode & ESP_LE_AUTH_BOND) != 0);
+      }
 
     }
 
   }
+#endif
 
+private:
+  ArmorLinkBleRuntime* _runtime;
 };
 };
 
