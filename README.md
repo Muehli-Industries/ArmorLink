@@ -321,9 +321,14 @@ and is included in profiles.
 
 ### Stable release
 
-ArmorLink 0.5.0 includes the configurable features, ActionBuilder Log Messages,
-Startup Actions and bounded full WebSerial descriptor streaming. Default feature
-flags remain enabled; existing device configurations are preserved.
+ArmorLink 0.5.1 adds support for the NimBLE backend used by current
+arduino-esp32 releases, strengthens PIN-protected BLE access, and exposes
+opt-in Servo Attach/Detach operations in ActionBuilder descriptors.
+BLE and pairing PINs are no longer printed in internal diagnostics.
 
-**App compatibility:** ArmorLink 0.5.0 requires ArmorLink App 1.6 or later for
+The configurable features, ActionBuilder Log Messages, Startup Actions and
+bounded WebSerial descriptor streaming introduced in 0.5.0 remain available.
+Default feature flags remain enabled; existing device configurations are preserved.
+
+**App compatibility:** ArmorLink 0.5.1 requires ArmorLink App 1.6 or later for
 correct operation. Update the app together with the firmware.
