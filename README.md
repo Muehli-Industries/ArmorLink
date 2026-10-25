@@ -43,6 +43,8 @@ Built for modular systems like wearables, robotics, and distributed control setu
 ### 📡 Optional App Control (BLE)
 - Live control, logs, and configuration  
 - JSON-based protocol  
+- Works on both BLE backends of arduino-esp32 3.x: Bluedroid (ESP32) and NimBLE (ESP32-C3/C6/H2…)  
+- With a PIN set, characteristics require an authenticated (passkey/MITM) link; Just Works peers are disconnected and unpaired  
 
 ### 🧠 Smart Logging
 - Module → Gateway forwarding  
