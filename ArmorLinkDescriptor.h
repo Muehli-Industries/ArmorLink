@@ -251,6 +251,11 @@ private:
     if (isWebSerial) {
       writeBoolProperty(out, first, "supportsStartupSequence", ARMORLINK_HAS_ACTIONBUILDER);
       writeBoolProperty(out, first, "supportsLogMessages", ARMORLINK_HAS_ACTIONBUILDER);
+#if ARMORLINK_HAS_ACTIONBUILDER
+      writeBoolProperty(out, first, "supportsServoAttachDetach", module.actionBuilder().supportsServoAttachDetach);
+#else
+      writeBoolProperty(out, first, "supportsServoAttachDetach", false);
+#endif
       writeBoolProperty(out, first, "supportsActionBuilder",
                         ARMORLINK_HAS_ACTIONBUILDER && (hasBuilderSurface ||
                         module.actions().items().size() > 0));
@@ -1032,6 +1037,11 @@ private:
     if (isWebSerial) {
       doc["supportsStartupSequence"] = bool(ARMORLINK_HAS_ACTIONBUILDER);
       doc["supportsLogMessages"] = bool(ARMORLINK_HAS_ACTIONBUILDER);
+#if ARMORLINK_HAS_ACTIONBUILDER
+      doc["supportsServoAttachDetach"] = module.actionBuilder().supportsServoAttachDetach;
+#else
+      doc["supportsServoAttachDetach"] = false;
+#endif
       doc["supportsActionBuilder"] =
           ARMORLINK_HAS_ACTIONBUILDER &&
           (hasBuilderSurface || module.actions().items().size() > 0);
@@ -1135,6 +1145,8 @@ private:
 
   static const char* actionOpCodeToString(ArmorLinkActionOpCode op) {
     switch (op) {
+      case ArmorLinkActionOpCode::ServoAttach: return "servo_attach";
+      case ArmorLinkActionOpCode::ServoDetach: return "servo_detach";
       case ArmorLinkActionOpCode::ServoOpen: return "servo_open";
       case ArmorLinkActionOpCode::ServoClose: return "servo_close";
       case ArmorLinkActionOpCode::ServoMoveTo: return "servo_move_to";

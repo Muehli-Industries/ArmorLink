@@ -7,3 +7,7 @@
 /docs/*
 !/docs/feature-footprint.png
 !/docs/heap-benchmark.png
+AGENTS.md
+.DS_Store
+.DS_Store
+README.md
