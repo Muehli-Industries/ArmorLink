@@ -509,7 +509,14 @@ private:
     }
   }
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
+  // IDF >= 5.4 changed esp_now_send_cb_t's first parameter from the peer MAC to
+  // a wifi_tx_info_t carrying it in des_addr.
+  static void onSentStatic(const wifi_tx_info_t* txInfo, esp_now_send_status_t status) {
+    const uint8_t* mac_addr = (txInfo != nullptr) ? txInfo->des_addr : nullptr;
+#else
   static void onSentStatic(const uint8_t* mac_addr, esp_now_send_status_t status) {
+#endif
     ArmorLinkTransportEspNow* self = instance();
     if (self) self->enqueueSendStatus(mac_addr, status);
   }

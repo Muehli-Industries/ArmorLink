@@ -660,7 +660,7 @@ void setGatewayMode(bool enabled) {
         _peers.removePeer(String(removed.name));
         emitModuleUnpairedEvent(removed);
       }
-      memset(_pairedModules, 0, sizeof(_pairedModules));
+      memset(static_cast<void*>(_pairedModules), 0, sizeof(_pairedModules));
       _pairedModuleCount = 0;
       syncPresenceStatesFromStoredModules();
       emitModulePresenceSnapshot();
@@ -3771,6 +3771,7 @@ bool handleSerialServoMove(
         servo->pin
     );
 #else
+    (void)appliedPosition;
     sendSerialFlasherError(
         requestId,
         "servo_unavailable",
@@ -5841,7 +5842,7 @@ void unpairModuleFromSerial(const String& value) {
   }
   void syncPresenceStatesFromStoredModules() {
 #if ARMORLINK_HAS_ESPNOW
-    memset(_presenceStates, 0, sizeof(_presenceStates));
+    memset(static_cast<void*>(_presenceStates), 0, sizeof(_presenceStates));
 
     for (size_t i = 0; i < _pairedModuleCount && i < ArmorLinkStorage::MAX_PAIRED_MODULES; ++i) {
       _presenceStates[i].occupied = true;
@@ -6884,7 +6885,7 @@ void emitModulePresenceSnapshot() {
     const char* sourceName = (_module != nullptr) ? _module->name().c_str() : "ArmorLink";
     
 
-    esp_err_t result = _transport.sendLogToTarget(
+    (void)_transport.sendLogToTarget(
       _options.defaultLogTarget,
       sourceName,
       level,
@@ -7214,10 +7215,9 @@ static void handleBleConnectedStatic() {
     const String gatewayMac  = String((const char*)(doc["gm"] | doc["gatewayMac"] | ""));
     const uint32_t recoveryPin = doc["rp"] | doc["recoveryPin"] | 0;
 
-    AL_INTERNAL_PRINTF("[PAIR] gatewayName=%s gatewayMac=%s recoveryPin=%lu\n",
+    AL_INTERNAL_PRINTF("[PAIR] gatewayName=%s gatewayMac=%s\n",
                   gatewayName.c_str(),
-                  gatewayMac.c_str(),
-                  (unsigned long)recoveryPin);
+                  gatewayMac.c_str());
 
     if (gatewayName.isEmpty() || gatewayMac.isEmpty()) {
       return;
@@ -7301,7 +7301,7 @@ emitPairingLinkedEvent(gatewayName, gatewayMac);
 
   void clearPendingPairingCandidates() {
 #if ARMORLINK_HAS_ESPNOW
-    memset(_pendingCandidates, 0, sizeof(_pendingCandidates));
+    memset(static_cast<void*>(_pendingCandidates), 0, sizeof(_pendingCandidates));
     _pendingCandidateCount = 0;
 #endif
   }
@@ -7350,7 +7350,7 @@ emitPairingLinkedEvent(gatewayName, gatewayMac);
   const uint8_t broadcastMac[6] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
   };
-  esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);  
+  (void)_transport.sendPacketToMac(broadcastMac, out);
 }
 
 void syncLoggingStateToModule(const char* moduleName, const char* moduleMac) {
@@ -7394,7 +7394,7 @@ void loggingSyncTick() {
     out.valueInt = _remoteLoggingEnabled ? 1 : 0;
     setArmorLinkPacketPayload(out, _remoteLoggingEnabled ? "true" : "false");
 
-    esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);    
+    (void)_transport.sendPacketToMac(broadcastMac, out);
 
     _loggingSyncStage = 1;
     _loggingSyncAtMs = now + 250;
@@ -7415,7 +7415,7 @@ void loggingSyncTick() {
     out.valueInt = _remoteLogLevel;
     setArmorLinkPacketPayload(out, logLevelToKeyword(_remoteLogLevel));
 
-    esp_err_t result = _transport.sendPacketToMac(broadcastMac, out);    
+    (void)_transport.sendPacketToMac(broadcastMac, out);
 
     _loggingSyncPending = false;
     _loggingSyncStage = 0;    
@@ -7476,7 +7476,7 @@ void loggingSyncTick() {
     }
 
     if (_pairedModuleCount > 0) {
-      memset(&_pairedModules[_pairedModuleCount - 1], 0, sizeof(ArmorLinkStoredPairedModule));
+      memset(static_cast<void*>(&_pairedModules[_pairedModuleCount - 1]), 0, sizeof(ArmorLinkStoredPairedModule));
       _pairedModuleCount--;
     }
 

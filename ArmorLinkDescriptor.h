@@ -647,9 +647,9 @@ private:
   static void writeActionComponentsStreaming(const ArmorLinkModule& module,
                                              Print& out) {
     out.print('[');
-    bool firstComponent = true;
 
 #if ARMORLINK_HAS_ACTIONBUILDER
+    bool firstComponent = true;
     for (const auto& component : module.actionBuilder().components()) {
       if (!firstComponent) {
         out.print(',');
@@ -745,9 +745,9 @@ private:
   static void writeActionDefinitionsStreaming(const ArmorLinkModule& module,
                                               Print& out) {
     out.print('[');
-    bool firstDefinition = true;
 
 #if ARMORLINK_HAS_ACTIONBUILDER
+    bool firstDefinition = true;
     for (const auto& definition : module.actionBuilder().definitions()) {
       if (!firstDefinition) {
         out.print(',');
@@ -835,9 +835,9 @@ private:
   static void writeActionTargetsStreaming(const ArmorLinkModule& module,
                                           Print& out) {
     out.print('[');
-    bool firstTarget = true;
 
 #if ARMORLINK_HAS_ACTIONBUILDER
+    bool firstTarget = true;
     for (const auto& target : module.actionBuilder().actionTargets(module.actions())) {
       if (!firstTarget) {
         out.print(',');
@@ -1623,9 +1623,9 @@ private:
     snprintf(
         uniqueId,
         sizeof(uniqueId),
-        "%04X%08X",
-        static_cast<uint16_t>(chipId >> 32),
-        static_cast<uint32_t>(chipId));
+        "%04X%08lX",
+        static_cast<unsigned>(chipId >> 32) & 0xFFFFu,
+        static_cast<unsigned long>(chipId & 0xFFFFFFFFu));
     return String(uniqueId);
   }
 };
