@@ -58,7 +58,9 @@ enum class ArmorLinkActionOpCode : uint8_t {
   LedSetColor = 15,
   LedSetBrightness = 16,
   LedAnimation = 17,
-  LogMessage = 32
+  LogMessage = 32,
+  ServoAttach = 33,
+  ServoDetach = 34
 };
 
 struct ArmorLinkActionLogMessage {
@@ -902,6 +904,8 @@ private:
 
 class ArmorLinkActionBuilderRuntime {
 public:
+  // Opt in only when the firmware hardware handler supports both operations.
+  bool supportsServoAttachDetach = false;
   ArmorLinkActionComponentBuilder addComponent(
       const String& id,
       ArmorLinkActionComponentKind kind) {
@@ -1651,6 +1655,8 @@ private:
     }
 
     auto& component = _components[op.componentIndex];
+    if ((op.code == ArmorLinkActionOpCode::ServoAttach || op.code == ArmorLinkActionOpCode::ServoDetach) &&
+        (!supportsServoAttachDetach || component.kind != ArmorLinkActionComponentKind::Servo)) return false;
 
     if (!component.handler && !component.argumentHandler && !component.operationHandler) {
       if (op.code == ArmorLinkActionOpCode::StateSet &&

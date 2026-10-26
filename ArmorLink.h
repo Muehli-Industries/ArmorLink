@@ -3280,6 +3280,12 @@ bool handleSerialActionDefinitionSet(
                 return true;
             }
 
+            if ((op.code == ArmorLinkActionOpCode::ServoAttach || op.code == ArmorLinkActionOpCode::ServoDetach) &&
+                (!_module->actionBuilder().supportsServoAttachDetach ||
+                 _module->actionBuilder().components()[componentIndex].kind != ArmorLinkActionComponentKind::Servo)) {
+                sendSerialFlasherError(requestId, "unsupported_operation", "Servo Attach/Detach requires capable firmware and a Servo component");
+                return true;
+            }
             op.componentIndex = static_cast<uint8_t>(componentIndex);
 
             if (op.code == ArmorLinkActionOpCode::WaitUntilState) {
@@ -3443,6 +3449,8 @@ bool handleSerialActionDefinitionDelete(
   }
 
 ArmorLinkActionOpCode actionOpCodeFromString(const String& opName) const {
+    if (opName.equalsIgnoreCase("servo_attach")) return ArmorLinkActionOpCode::ServoAttach;
+    if (opName.equalsIgnoreCase("servo_detach")) return ArmorLinkActionOpCode::ServoDetach;
     if (opName.equalsIgnoreCase("servo_open")) return ArmorLinkActionOpCode::ServoOpen;
     if (opName.equalsIgnoreCase("servo_close")) return ArmorLinkActionOpCode::ServoClose;
     if (opName.equalsIgnoreCase("servo_move_to")) return ArmorLinkActionOpCode::ServoMoveTo;
