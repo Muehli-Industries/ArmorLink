@@ -120,7 +120,7 @@ flash and RAM, define exclusions **before any ArmorLink header**:
 
 | Define | Removes |
 | --- | --- |
-| `ARMORLINK_EXCLUDE_ESPNOW` | ESP-NOW/WiFi transport, receive queue, peer map, pairing processing and network tables. Gateway mode is disabled; local BLE logs and telemetry still work. |
+| `ARMORLINK_EXCLUDE_ESPNOW` | ESP-NOW/WiFi transport, receive queue, peer map, pairing processing and network tables. Gateway mode stays available as the BLE root role (it still sends the `gateway_descriptor`); config get/set and commands addressed to another node are refused with `Module not paired`. With serial commands or the serial menu enabled and a PIN set, a gateway's USB `config_meta` includes the Bluetooth PIN, as on ESP-NOW builds. On ESP32 this needs arduino-esp32 3.x (`esp_mac.h`). Local BLE logs and telemetry still work. |
 | `ARMORLINK_EXCLUDE_BLE` | BLE stack integration, server, callbacks and transfers. BLE notification helpers become no-ops. |
 | `ARMORLINK_EXCLUDE_ACTIONBUILDER` | Dynamic sequences, components, custom actions and their storage/descriptor integration. Ordinary `module.actions().add(...).command(...).onExecute(...)` remains available; `module.actionBuilder()` is absent. |
 | `ARMORLINK_EXCLUDE_DATASTREAMS` | Stream routing, subscriptions, handlers and rate tables. Registration/subscription returns `false`; sending returns `ESP_ERR_NOT_SUPPORTED`. Telemetry remains available. |

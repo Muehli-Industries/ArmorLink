@@ -7,6 +7,9 @@
 #else
 #define ARMORLINK_HAS_ESPNOW 1
 #endif
+// Gateway mode (the gateway_descriptor sent to a phone) works without ESP-NOW.
+// Applications can test this to refuse a library that forces it off.
+#define ARMORLINK_GATEWAY_WITHOUT_ESPNOW 1
 #ifdef ARMORLINK_EXCLUDE_BLE
 #define ARMORLINK_HAS_BLE 0
 #else
