@@ -617,11 +617,11 @@ public:
 // Gateway mode is also the BLE root role: it sends the gateway_descriptor that
 // tells a phone this node's module name. That needs no ESP-NOW, so it is
 // honoured when ESP-NOW is excluded. Every ESP-NOW send is compiled out or
-// checks _options.enableEspNow, which stays false there. What still changes
-// with gateway on: addressed forwards are refused with "Module not paired";
-// a BLE disconnect clears remote logging/telemetry; data streams take the
-// gateway route; the USB serial config_meta carries the BLE PIN and the serial
-// menu runs, when serial commands are enabled; pairing commands fail.
+// checks _options.enableEspNow, which stays false there. Notable effects that
+// remain with gateway on: addressed forwards are refused with "Module not
+// paired"; a BLE disconnect clears remote logging/telemetry; data streams take
+// the gateway route; once a PIN is set, the USB serial config_meta carries it
+// (enableSerialCommands or enableSerialMenu); enableSerialMenu runs the menu.
 void setGatewayMode(bool enabled) {
   _isGatewayMode = enabled;
 
