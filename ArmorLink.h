@@ -6,6 +6,9 @@
 #if defined(ESP32) && ARMORLINK_HAS_ESPNOW
   #include <esp_wifi.h>
 #endif
+#if defined(ESP32)
+  #include <esp_mac.h>
+#endif
 #include "ArmorLinkModule.h"
 #include "ArmorLinkStorage.h"
 #include "ArmorLinkDescriptor.h"
@@ -611,8 +614,11 @@ public:
     _espNowCommandHook = hook;
   }
 
+// Gateway mode is also the BLE root role: it sends the gateway_descriptor that
+// tells a phone this node's module name. That part needs no ESP-NOW, so it is
+// honoured when ESP-NOW is excluded; every ESP-NOW gateway path is compiled out
+// or checks _options.enableEspNow, which stays false there.
 void setGatewayMode(bool enabled) {
-    enabled = ARMORLINK_HAS_ESPNOW && enabled;
   _isGatewayMode = enabled;
 
   if (_isGatewayMode) {
@@ -2186,7 +2192,6 @@ private:
     }
 
     _module->name(_systemConfig.nodeName);
-    _systemConfig.gatewayMode = ARMORLINK_HAS_ESPNOW && _systemConfig.gatewayMode;
     _systemConfig.wirelessEnabled = ARMORLINK_HAS_ESPNOW && _systemConfig.wirelessEnabled;
     _systemConfig.bluetoothEnabled = ARMORLINK_HAS_BLE && _systemConfig.bluetoothEnabled;
     _options.enableGateway = _systemConfig.gatewayMode;
@@ -7260,6 +7265,12 @@ emitPairingLinkedEvent(gatewayName, gatewayMac);
 #else
     return "";
 #endif
+#elif defined(ESP32)
+    // No WiFi driver without ESP-NOW; read the station MAC from eFuse instead,
+    // so the gateway_descriptor still names this node.
+    uint8_t mac[6];
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return String();
+    return armorLinkMacToString(mac);
 #else
     return String();
 #endif
