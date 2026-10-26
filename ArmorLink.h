@@ -6,8 +6,8 @@
 #if defined(ESP32) && ARMORLINK_HAS_ESPNOW
   #include <esp_wifi.h>
 #endif
-#if defined(ESP32)
-  #include <esp_mac.h>
+#if defined(ESP32) && !ARMORLINK_HAS_ESPNOW
+  #include <esp_mac.h>  // localMacString() eFuse fallback
 #endif
 #include "ArmorLinkModule.h"
 #include "ArmorLinkStorage.h"
@@ -615,9 +615,13 @@ public:
   }
 
 // Gateway mode is also the BLE root role: it sends the gateway_descriptor that
-// tells a phone this node's module name. That part needs no ESP-NOW, so it is
-// honoured when ESP-NOW is excluded; every ESP-NOW gateway path is compiled out
-// or checks _options.enableEspNow, which stays false there.
+// tells a phone this node's module name. That needs no ESP-NOW, so it is
+// honoured when ESP-NOW is excluded. Every ESP-NOW send is compiled out or
+// checks _options.enableEspNow, which stays false there. What still changes
+// with gateway on: addressed forwards are refused with "Module not paired";
+// a BLE disconnect clears remote logging/telemetry; data streams take the
+// gateway route; the USB serial config_meta carries the BLE PIN and the serial
+// menu runs, when serial commands are enabled; pairing commands fail.
 void setGatewayMode(bool enabled) {
   _isGatewayMode = enabled;
 
